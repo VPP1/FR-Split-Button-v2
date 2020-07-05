@@ -3,7 +3,8 @@
 TODO:
 TCP/IP communication:
 - untested: initialization
-- not done: sending commands to livesplit & recieving timer status
+- untested: sending commands to livesplit & recieving timer status
+- not done: replacing test things in button interrupts to actually sending livesplit commands
 
 Notes:
 Is static IP addressing for the buttons needed? We only need to know the
@@ -14,19 +15,23 @@ command to a custom timer which is done via LiveSplit Core or something similar?
 */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <stdbool.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+
 #include "driver/gpio.h"
 #include "driver/ledc.h"
+#include "tcpip_adapter.h"
+#include "esp_event.h"
+#include "esp_eth.h"
+#include "olimex_ethernet.h"
 
-//For delays, idk if needed
+//For delays
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
-
-#include "olimex_ethernet.h"
-
-#include "tcpip_adapter.h"
-#include "esp_eth.h"
 
 //I/O
 #define PauseBtnGPIO 14     //Input_pullup (UEXT)
@@ -47,11 +52,25 @@ command to a custom timer which is done via LiveSplit Core or something similar?
 //0% - 100% duty => 0 - 8192 duty variable
 #define DutyMax 8192
 
+//LiveSplit Server IP/Port
+#define LiveSplitIP "192.168.1.1"
+#define LiveSplitPort 16834
+
+//LiveSplit Server command/status messages
+#define CommandSplit "startorsplit"
+#define CommandPause "pause"
+#define CommandGetState "getcurrenttimerphase"
+#define MsgStateNotRunning "NotRunning"
+#define MsgStateRunning "Running"
+#define MsgStateEnded "Ended"
+#define MsgStatePaused "Paused"
+
 //Main state variable
-//0 = standby
-//1 = timer running
-//2 = timer finished
-//3 = timer paused
+//0 = default, not connected/error
+//1 = not running
+//2 = timer running
+//3 = timer finished (ended)
+//4 = timer paused
 static int TimerState = 0;
 
 //PWM phase flag
@@ -101,69 +120,6 @@ const static gpio_config_t SplitBtnConfig =
 #pragma endregion
 
 
-void app_main()
-{
-    //---GPIO SETUP---
-    //Init fade - need to pass iram and shared flags for the
-    //interrupt routine to work at the end of the fade
-    ledc_fade_func_install(ESP_INTR_FLAG_IRAM|ESP_INTR_FLAG_SHARED);
-
-    //Register LEDC ISR service for interrupts
-    ledc_isr_register(LEDCInterrupt, NULL, ESP_INTR_FLAG_IRAM|ESP_INTR_FLAG_SHARED, NULL);
-
-    //Setup PWM output parameters
-    ESP_ERROR_CHECK(ledc_timer_config(&SplitLEDPWMConfig));
-    ESP_ERROR_CHECK(ledc_channel_config(&SplitLEDChannelConfig));
-
-    //Register GPIO ISR service for interrupts
-    gpio_install_isr_service(ESP_INTR_FLAG_IRAM);
-
-    //Add interrupt handlers for both buttons
-    gpio_isr_handler_add(PauseBtnGPIO, PauseInterrupt, NULL);
-    gpio_isr_handler_add(SplitBtnGPIO, SplitInterrupt, NULL);
-
-    //Setup GPIO input parameters
-    ESP_ERROR_CHECK(gpio_config(&PauseBtnConfig));
-    ESP_ERROR_CHECK(gpio_config(&SplitBtnConfig));
-
-
-    //---ETHERNET SETUP---
-    EthernetGPIOConfigRMII();
-    tcpip_adapter_init();
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
-    ESP_ERROR_CHECK(tcpip_adapter_set_default_eth_handlers());
-    ESP_ERROR_CHECK(esp_event_handler_register(ETH_EVENT, ESP_EVENT_ANY_ID, &EthernetEvent, NULL));
-
-    eth_mac_config_t macConfig = ETH_MAC_DEFAULT_CONFIG();
-    macConfig.smi_mdc_gpio_num = ETHMDCPin;
-    macConfig.smi_mdio_gpio_num = ETHMDIOPin;
-
-    eth_phy_config_t phyConfig = ETH_PHY_DEFAULT_CONFIG();
-    phyConfig.phy_addr = 0;     //Any address is ok, we have only 1 connection
-
-    //Set the eth physical layer enable pin high
-    gpio_pad_select_gpio(PHYPowerPin);
-    gpio_set_direction(PHYPowerPin, GPIO_MODE_OUTPUT);
-    gpio_set_level(PHYPowerPin, 1);
-    vTaskDelay(pdMS_TO_TICKS(10));  //Wait 10ms for the enable to take effect? Is this needed?
-
-    //Initialize ethernet PHY, lan8720 config (RJ45 port)
-    esp_eth_mac_t *ethMac = esp_eth_mac_new_esp32(&macConfig);
-    esp_eth_phy_t *ethPhy = esp_eth_phy_new_lan8720(&phyConfig);
-    esp_eth_config_t ethConfig = ETH_DEFAULT_CONFIG(ethMac, ethPhy);
-    esp_eth_handle_t ethHandle = NULL;
-    ESP_ERROR_CHECK(esp_eth_driver_install(&ethConfig, &ethHandle));
-    ESP_ERROR_CHECK(esp_eth_start(ethHandle));
-
-    //---MAIN LOOP---
-    while(1)
-    {
-        //TODO: poll timer every second or so
-        vTaskDelay(pdMS_TO_TICKS(10)); //Test: 10ms delay
-    }
-}
-
-
 //Set LED fading towards the wanted duty cycle
 void LEDFade(ledc_channel_config_t led, uint32_t duty, int fadeTime)
 {
@@ -194,18 +150,23 @@ void IRAM_ATTR LEDCInterrupt(void *param)
     //Set the led fading at a speed defined for each timer state, or set it a static on/off
     switch(TimerState)
     {
-        case 0:
-            LEDFade(SplitLEDChannelConfig, duty, FadeTimeStandby);
         case 1:
+            LEDFade(SplitLEDChannelConfig, duty, FadeTimeStandby);
+            break;
+        case 2:
             ledc_set_duty(SplitLEDChannelConfig.speed_mode, SplitLEDChannelConfig.channel, DutyMax);
             PWMPhase = true;
-        case 2:
-            LEDFade(SplitLEDChannelConfig, duty, FadeTimeTimerFinished);
+            break;
         case 3:
+            LEDFade(SplitLEDChannelConfig, duty, FadeTimeTimerFinished);
+            break;
+        case 4:
             LEDFade(SplitLEDChannelConfig, duty, FadeTimeTimerPaused);
+            break;
         default:
             ledc_set_duty(SplitLEDChannelConfig.speed_mode, SplitLEDChannelConfig.channel, 0);
             PWMPhase = false;
+            break;
     }
 }
 
@@ -232,14 +193,19 @@ void IRAM_ATTR SplitInterrupt(void *param)
     {
         case 0:     //Timer is in standby, start timer
             TimerState = 1;
+            break;
         case 1:     //Timer is running, stop timer
             TimerState = 2;
+            break;
         case 2:     //Timer is finished, reset timer
             TimerState = 0;
+            break;
         case 3:     //Timer is paused, resume timer
             TimerState = 1;
+            break;
         default:
             TimerState = 0;
+            break;
     }
 
     //TODO: for testing, change this to be called when we get new state value from timer
@@ -249,22 +215,6 @@ void IRAM_ATTR SplitInterrupt(void *param)
 
 
 #pragma region Ethernet communication
-void EthernetGPIOConfigRMII()
-{
-    // RMII data pins are fixed:
-    // TXD0 = GPIO19
-    // TXD1 = GPIO22
-    // TX_EN = GPIO21
-    // RXD0 = GPIO25
-    // RXD1 = GPIO26
-    // CLK == GPIO0
-    phy_rmii_configure_data_interface_pins();
-    // MDC is GPIO 23, MDIO is GPIO 18
-    phy_rmii_smi_configure_pins(ETHMDCPin, ETHMDIOPin);
-}
-
-
-
 //Event handler for ethernet events, sets MAC-address upon connecting
 void EthernetEvent(void *arg, esp_event_base_t eventBase, int32_t eventID, void *eventData)
 {
@@ -275,6 +225,162 @@ void EthernetEvent(void *arg, esp_event_base_t eventBase, int32_t eventID, void 
     {
         esp_eth_ioctl(ethHandle, ETH_CMD_G_MAC_ADDR, macAddr);
     }
-} 
+}
+
+
+//Sends a command to LiveSplit server
+//TODO: figure out how to pass the const string into this
+void LiveSplitQuery(int socket, char *command)
+{
+    char msg[256] = command;
+    send(socket, msg, sizeof(msg), 0);
+}
+
+
+//Reads a response from LiveSplit server and determines the timer state
+int LiveSplitState(int socket, int currentState)
+{
+    int status = 0;
+    char serverResponse[256];
+
+    //Setup socket monitoring, wait for 20000us before timing out
+    int dataAvailable = 0;
+    fd_set readFds;
+    struct timeval timeout =
+    {
+        .tv_sec = 0,
+        .tv_usec = 20000
+    };
+
+    FD_ZERO(&readFds);
+    FD_SET(socket, &readFds);
+
+    dataAvailable = select(socket+1, &readFds, NULL, NULL, &timeout);
+
+    //If no data is available, set current status
+    //If data is available, read it and determine the timer status
+    if(dataAvailable == 0)
+    {
+        status = currentState;
+    }
+    else
+    {
+        recv(socket, &serverResponse, sizeof(serverResponse), 0);
+
+        if(strcmp(serverResponse, MsgStateNotRunning) == 0)
+        {
+            status = 1;
+        }
+        else if(strcmp(serverResponse, MsgStateRunning) == 0)
+        {
+            status = 2;
+        }
+        else if(strcmp(serverResponse, MsgStateEnded) == 0)
+        {
+            status = 3;
+        }
+        else if(strcmp(serverResponse, MsgStatePaused) == 0)
+        {
+            status = 4;
+        }
+    }
+    
+    return status;
+}
 #pragma endregion
 
+void app_main()
+{
+    //---GPIO SETUP---
+    //Init fade - need to pass iram and shared flags for the
+    //interrupt routine to work at the end of the fade
+    ledc_fade_func_install(ESP_INTR_FLAG_IRAM|ESP_INTR_FLAG_SHARED);
+
+    //Register LEDC ISR service for interrupts
+    ledc_isr_register(LEDCInterrupt, NULL, ESP_INTR_FLAG_IRAM|ESP_INTR_FLAG_SHARED, NULL);
+
+    //Setup PWM output parameters
+    ESP_ERROR_CHECK(ledc_timer_config(&SplitLEDPWMConfig));
+    ESP_ERROR_CHECK(ledc_channel_config(&SplitLEDChannelConfig));
+
+    //Register GPIO ISR service for interrupts
+    gpio_install_isr_service(ESP_INTR_FLAG_IRAM);
+
+    //Add interrupt handlers for both buttons
+    gpio_isr_handler_add(PauseBtnGPIO, PauseInterrupt, NULL);
+    gpio_isr_handler_add(SplitBtnGPIO, SplitInterrupt, NULL);
+
+    //Setup GPIO input parameters
+    ESP_ERROR_CHECK(gpio_config(&PauseBtnConfig));
+    ESP_ERROR_CHECK(gpio_config(&SplitBtnConfig));
+
+
+    //---ETHERNET SETUP---
+    tcpip_adapter_init();
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    ESP_ERROR_CHECK(tcpip_adapter_set_default_eth_handlers());
+    ESP_ERROR_CHECK(esp_event_handler_register(ETH_EVENT, ESP_EVENT_ANY_ID, &EthernetEvent, NULL));
+
+    eth_mac_config_t macConfig = ETH_MAC_DEFAULT_CONFIG();
+    macConfig.smi_mdc_gpio_num = ETHMDCPin;
+    macConfig.smi_mdio_gpio_num = ETHMDIOPin;
+
+    eth_phy_config_t phyConfig = ETH_PHY_DEFAULT_CONFIG();
+    phyConfig.phy_addr = 0;     //Any address is ok, we have only 1 connection
+
+    //Set the eth physical layer enable pin high
+    gpio_pad_select_gpio(PHYPowerPin);
+    gpio_set_direction(PHYPowerPin, GPIO_MODE_OUTPUT);
+    gpio_set_level(PHYPowerPin, 1);
+    vTaskDelay(pdMS_TO_TICKS(10));  //Wait 10ms for the enable to take effect? Is this needed?
+
+    //Initialize ethernet PHY, lan8720 config (RJ45 port)
+    esp_eth_mac_t *ethMac = esp_eth_mac_new_esp32(&macConfig);
+    esp_eth_phy_t *ethPhy = esp_eth_phy_new_lan8720(&phyConfig);
+    esp_eth_config_t ethConfig = ETH_DEFAULT_CONFIG(ethMac, ethPhy);
+    esp_eth_handle_t ethHandle = NULL;
+    ESP_ERROR_CHECK(esp_eth_driver_install(&ethConfig, &ethHandle));
+    ESP_ERROR_CHECK(esp_eth_start(ethHandle));
+
+    //Create a socket
+    int networkSocket = socket(AF_INET, SOCK_STREAM, 0);
+    
+    //Specify IP-address for the socket
+    struct sockaddr_in serverAddr = 
+    {
+        .sin_family = AF_INET,
+        .sin_port = htons(LiveSplitPort),
+        .sin_addr.s_addr = inet_addr(LiveSplitIP)
+    };
+
+    //Connect to the server (LiveSplit)
+    int connectionStatus = connect(networkSocket, (struct sockaddr *) &serverAddr, sizeof(serverAddr));
+
+    //Connection failure
+    if(connectionStatus == -1)
+    {
+        printf("Error connecting to LiveSplit!");
+    }
+
+    //---MAIN LOOP---
+    while(1)
+    {
+        int NewState;
+
+        //Poll timer state
+        LiveSplitQuery(networkSocket, CommandGetState);
+
+        //Check if got response to timer state poll
+        NewState = LiveSplitState(networkSocket, TimerState);
+
+        //If we got a new state value from LiveSplit, call LEDCInterrput to update the split btn led
+        if(NewState != TimerState)
+        {
+            TimerState = NewState;
+            LEDCInterrupt(NULL);
+        }
+
+        //100ms delay
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
