@@ -74,7 +74,13 @@ command to a custom timer which is done via LiveSplit Core or something similar?
 //2 = timer running
 //3 = timer finished (ended)
 //4 = timer paused
-static int TimerState = 0;
+const static int TimerDefault = 0;
+const static int TimerStandby = 1;
+const static int TimerRunning = 2;
+const static int TimerFinished = 3;
+const static int TimerPaused = 4;
+
+static int TimerState = TimerDefault;
 
 //PWM phase flag
 //True = at max duty
@@ -152,18 +158,18 @@ void IRAM_ATTR LEDCInterrupt(void *param)
     //Set the led fading at a speed defined for each timer state, or set it a static on/off
     switch(TimerState)
     {
-        case 1:
+        case TimerStandby:
             LEDFade(SplitLEDChannelConfig, duty, TIME_FADE_STANDBY);
             break;
-        case 2:
+        case TimerRunning:
             ledc_set_duty(SplitLEDChannelConfig.speed_mode, SplitLEDChannelConfig.channel, LED_DUTY_MAX);
             ledc_update_duty(SplitLEDChannelConfig.speed_mode, SplitLEDChannelConfig.channel);
             PWMPhase = true;
             break;
-        case 3:
+        case TimerFinished:
             LEDFade(SplitLEDChannelConfig, duty, TIME_FADE_TIMER_FINISHED);
             break;
-        case 4:
+        case TimerPaused:
             LEDFade(SplitLEDChannelConfig, duty, TIME_FADE_TIMER_PAUSED);
             break;
         default:
@@ -178,13 +184,13 @@ void IRAM_ATTR PauseInterrupt(void *param)
 {
     //If the timer is in progress, pause timer
     //If the timer is paused, resume timer
-    if(TimerState == 1)
+    if(TimerState == TimerRunning)
     {
-        TimerState = 3; //TODO: replace with command to livesplit
+        TimerState = TimerPaused; //TODO: replace with command to livesplit
     }
-    else if(TimerState == 3)
+    else if(TimerState == TimerPaused)
     {
-        TimerState = 1;
+        TimerState = TimerRunning;
     }
 
     //TODO: for testing, change this to be called when we get new state value from timer
@@ -195,20 +201,23 @@ void IRAM_ATTR SplitInterrupt(void *param)
 {
     switch(TimerState)
     {
-        case 0:     //Timer is in standby, start timer
-            TimerState = 1;
+        case TimerDefault:     //Timer is in unknown state, set to standby
+            TimerState = TimerStandby;
             break;
-        case 1:     //Timer is running, stop timer
-            TimerState = 2;
+        case TimerStandby:     //Timer is in standby, start timer
+            TimerState = TimerRunning;
             break;
-        case 2:     //Timer is finished, reset timer
-            TimerState = 0;
+        case TimerRunning:     //Timer is running, stop timer
+            TimerState = TimerFinished;
             break;
-        case 3:     //Timer is paused, resume timer
-            TimerState = 1;
+        case TimerFinished:     //Timer is finished, reset timer
+            TimerState = TimerStandby;
+            break;
+        case TimerPaused:     //Timer is paused, resume timer
+            TimerState = TimerRunning;
             break;
         default:
-            TimerState = 0;
+            TimerState = TimerDefault;
             break;
     }
 
@@ -274,19 +283,19 @@ int LiveSplitState(int socket, int currentState)
 
         if(strcmp(serverResponse, MSG_STATE_NOT_RUNNING) == 0)
         {
-            status = 1;
+            status = TimerStandby;
         }
         else if(strcmp(serverResponse, MSG_STATE_RUNNING) == 0)
         {
-            status = 2;
+            status = TimerRunning;
         }
         else if(strcmp(serverResponse, MSG_STATE_ENDED) == 0)
         {
-            status = 3;
+            status = TimerFinished;
         }
         else if(strcmp(serverResponse, MSG_STATE_PAUSED) == 0)
         {
-            status = 4;
+            status = TimerPaused;
         }
     }
     
@@ -294,11 +303,9 @@ int LiveSplitState(int socket, int currentState)
 }
 
 
-//////////////////////////////MAIN//////////////////////////////
-void app_main()
+//////////////////////////////SETUP//////////////////////////////
+void SetupGPIO()
 {
-    /*
-    //---GPIO SETUP---
     //Init fade - need to pass iram and shared flags for the
     //interrupt routine to work at the end of the fade
     ledc_fade_func_install(ESP_INTR_FLAG_IRAM|ESP_INTR_FLAG_SHARED);
@@ -320,9 +327,10 @@ void app_main()
     //Setup GPIO input parameters
     ESP_ERROR_CHECK(gpio_config(&PauseBtnConfig));
     ESP_ERROR_CHECK(gpio_config(&SplitBtnConfig));
+}
 
-
-    //---ETHERNET SETUP---
+void SetupEth()
+{
     tcpip_adapter_init();
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     ESP_ERROR_CHECK(tcpip_adapter_set_default_eth_handlers());
@@ -368,13 +376,52 @@ void app_main()
     {
         printf("Error connecting to LiveSplit!\n");
     }
-    */
+}
 
-    //TEST
+
+//Test functions
+void TestSetup()
+{
     gpio_config(&SplitBtnConfig);
     gpio_config(&PauseBtnConfig);
     ledc_channel_config(&SplitLEDChannelConfig);
     ledc_timer_config(&SplitLEDPWMConfig);
+}
+
+void TestLoop()
+{
+    int splitLevel = gpio_get_level(GPIO_BTN_SPLIT);
+    int pauseLevel = gpio_get_level(GPIO_BTN_PAUSE);
+
+    printf("Split: %d\n", splitLevel);
+    printf("Pause: %d\n", pauseLevel);
+
+    if(splitLevel == 0)
+    {
+        ledc_set_duty(SplitLEDChannelConfig.speed_mode, SplitLEDChannelConfig.channel, LED_DUTY_MAX);            
+    }
+    else
+    {
+        ledc_set_duty(SplitLEDChannelConfig.speed_mode, SplitLEDChannelConfig.channel, 0);
+    }
+
+    ledc_update_duty(SplitLEDChannelConfig.speed_mode, SplitLEDChannelConfig.channel);
+
+    vTaskDelay(pdMS_TO_TICKS(1000));
+}
+
+
+
+
+
+//////////////////////////////MAIN//////////////////////////////
+void app_main()
+{
+    //SetupGPIO();
+    //SetupEth();    
+
+    TestSetup();
+
 
     //---MAIN LOOP---
     while(1)
@@ -400,23 +447,6 @@ void app_main()
         vTaskDelay(pdMS_TO_TICKS(100));
         */
 
-        int splitLevel = gpio_get_level(GPIO_BTN_SPLIT);
-        int pauseLevel = gpio_get_level(GPIO_BTN_PAUSE);
-
-        printf("Split: %d\n", splitLevel);
-        printf("Pause: %d\n", pauseLevel);
-
-        if(splitLevel == 0)
-        {
-            ledc_set_duty(SplitLEDChannelConfig.speed_mode, SplitLEDChannelConfig.channel, LED_DUTY_MAX);            
-        }
-        else
-        {
-            ledc_set_duty(SplitLEDChannelConfig.speed_mode, SplitLEDChannelConfig.channel, 0);
-        }
-
-        ledc_update_duty(SplitLEDChannelConfig.speed_mode, SplitLEDChannelConfig.channel);
-
-        vTaskDelay(pdMS_TO_TICKS(1000));
+       TestLoop();
     }
 }
