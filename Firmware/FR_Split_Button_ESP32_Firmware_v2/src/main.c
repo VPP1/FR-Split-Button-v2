@@ -1,6 +1,9 @@
 
 /*
 TODO:
+Test btn interrupts
+GPIO comfirmed working
+
 TCP/IP communication:
 - untested: initialization
 - untested: sending commands to livesplit & recieving timer status
@@ -34,36 +37,36 @@ command to a custom timer which is done via LiveSplit Core or something similar?
 #include "freertos/queue.h"
 
 //I/O
-#define PauseBtnGPIO 14     //Input_pullup (UEXT)
-#define SplitBtnGPIO 2      //Input_pullup (UEXT)
-#define SplitLEDGPIO 15     //Output (UEXT)
-#define PHYPowerPin 12      //Ethernet physical layer enable -output
-#define ETHMDCPin 23
-#define ETHMDIOPin 18
+#define GPIO_BTN_PAUSE 14     //Input_pullup (UEXT)
+#define GPIO_BTN_SPLIT 2      //Input_pullup (UEXT)
+#define GPIO_LED_SPLIT 15     //Output (UEXT)
+#define PIN_PHY_POWER 12      //Ethernet physical layer enable -output
+#define PIN_ETH_MDC 23
+#define PIN_ETH_MDIO 18
 
 //LED dynamization parameters, in milliseconds
-#define FadeTimeStandby 1000
-#define FadeTimeTimerFinished 100
-#define FadeTimeTimerPaused 200
+#define TIME_FADE_STANDBY 1000
+#define TIME_FADE_TIMER_FINISHED 100
+#define TIME_FADE_TIMER_PAUSED 200
 
 //Max led brightness
 //Since we are using 5kHz PWM freqeuncy defined in ledc_timer_config_t,
 //it means we have 13-bit resolution duty variable. 
 //0% - 100% duty => 0 - 8192 duty variable
-#define DutyMax 8192
+#define LED_DUTY_MAX 8192
 
 //LiveSplit Server IP/Port
-#define LiveSplitIP "192.168.1.1"
-#define LiveSplitPort 16834
+#define LIVESPLIT_IP "192.168.1.1"
+#define LIVESPLIT_PORT 16834
 
 //LiveSplit Server command/status messages
-#define CommandSplit "startorsplit"
-#define CommandPause "pause"
-#define CommandGetState "getcurrenttimerphase"
-#define MsgStateNotRunning "NotRunning"
-#define MsgStateRunning "Running"
-#define MsgStateEnded "Ended"
-#define MsgStatePaused "Paused"
+#define CMD_SPLIT "startorsplit"
+#define CMD_PAUSE "pause"
+#define CMD_GET_STATE "getcurrenttimerphase"
+#define MSG_STATE_NOT_RUNNING "NotRunning"
+#define MSG_STATE_RUNNING "Running"
+#define MSG_STATE_ENDED "Ended"
+#define MSG_STATE_PAUSED "Paused"
 
 //Main state variable
 //0 = default, not connected/error
@@ -78,7 +81,7 @@ static int TimerState = 0;
 //False = at 0
 static bool PWMPhase = false;
 
-#pragma region Configurations
+//////////////////////////////CONFIGURATIONS//////////////////////////////
 //PWM configuration
 const static ledc_timer_config_t SplitLEDPWMConfig =
 {
@@ -93,7 +96,7 @@ const static ledc_channel_config_t SplitLEDChannelConfig =
 {
     .channel    = LEDC_CHANNEL_0,
     .duty       = 0,
-    .gpio_num   = SplitLEDGPIO,
+    .gpio_num   = GPIO_LED_SPLIT,
     .speed_mode = LEDC_HIGH_SPEED_MODE,
     .hpoint     = 0,
     .timer_sel  = LEDC_TIMER_0
@@ -105,7 +108,7 @@ const static gpio_config_t PauseBtnConfig =
 {
     .intr_type = GPIO_PIN_INTR_NEGEDGE,
     .mode = GPIO_MODE_INPUT,
-    .pin_bit_mask = (1ULL<<PauseBtnGPIO),
+    .pin_bit_mask = (1ULL<<GPIO_BTN_PAUSE),
     .pull_up_en = GPIO_PULLUP_ENABLE
 };
 
@@ -114,10 +117,9 @@ const static gpio_config_t SplitBtnConfig =
 {
     .intr_type = GPIO_PIN_INTR_NEGEDGE,
     .mode = GPIO_MODE_INPUT,
-    .pin_bit_mask = (1ULL<<SplitBtnGPIO),
+    .pin_bit_mask = (1ULL<<GPIO_BTN_SPLIT),
     .pull_up_en = GPIO_PULLUP_ENABLE
 };
-#pragma endregion
 
 
 //Set LED fading towards the wanted duty cycle
@@ -128,7 +130,7 @@ void LEDFade(ledc_channel_config_t led, uint32_t duty, int fadeTime)
 }
 
 
-#pragma region Interrupts (buttons, LEDC fade completion)
+//////////////////////////////Interrupts (buttons, LEDC fade completion)//////////////////////////////
 //Executes automatically once ledc_set_fade_with_time is done
 //Also called when we want to update the LED after state change
 void IRAM_ATTR LEDCInterrupt(void *param)
@@ -144,27 +146,29 @@ void IRAM_ATTR LEDCInterrupt(void *param)
     }
     else
     {
-        duty = DutyMax; //At low phase, start going towards max value
+        duty = LED_DUTY_MAX; //At low phase, start going towards max value
     }
     
     //Set the led fading at a speed defined for each timer state, or set it a static on/off
     switch(TimerState)
     {
         case 1:
-            LEDFade(SplitLEDChannelConfig, duty, FadeTimeStandby);
+            LEDFade(SplitLEDChannelConfig, duty, TIME_FADE_STANDBY);
             break;
         case 2:
-            ledc_set_duty(SplitLEDChannelConfig.speed_mode, SplitLEDChannelConfig.channel, DutyMax);
+            ledc_set_duty(SplitLEDChannelConfig.speed_mode, SplitLEDChannelConfig.channel, LED_DUTY_MAX);
+            ledc_update_duty(SplitLEDChannelConfig.speed_mode, SplitLEDChannelConfig.channel);
             PWMPhase = true;
             break;
         case 3:
-            LEDFade(SplitLEDChannelConfig, duty, FadeTimeTimerFinished);
+            LEDFade(SplitLEDChannelConfig, duty, TIME_FADE_TIMER_FINISHED);
             break;
         case 4:
-            LEDFade(SplitLEDChannelConfig, duty, FadeTimeTimerPaused);
+            LEDFade(SplitLEDChannelConfig, duty, TIME_FADE_TIMER_PAUSED);
             break;
         default:
             ledc_set_duty(SplitLEDChannelConfig.speed_mode, SplitLEDChannelConfig.channel, 0);
+            ledc_update_duty(SplitLEDChannelConfig.speed_mode, SplitLEDChannelConfig.channel);
             PWMPhase = false;
             break;
     }
@@ -211,10 +215,10 @@ void IRAM_ATTR SplitInterrupt(void *param)
     //TODO: for testing, change this to be called when we get new state value from timer
     LEDCInterrupt(NULL);
 }
-#pragma endregion
 
 
-#pragma region Ethernet communication
+
+//////////////////////////////Ethernet communication//////////////////////////////
 //Event handler for ethernet events, sets MAC-address upon connecting
 void EthernetEvent(void *arg, esp_event_base_t eventBase, int32_t eventID, void *eventData)
 {
@@ -229,10 +233,11 @@ void EthernetEvent(void *arg, esp_event_base_t eventBase, int32_t eventID, void 
 
 
 //Sends a command to LiveSplit server
-//TODO: figure out how to pass the const string into this
 void LiveSplitQuery(int socket, char *command)
 {
-    char msg[256] = command;
+    //char msg[256] = command; TODO: figure out how to pass the const string into this
+
+    char msg[256] = "startorsplit";
     send(socket, msg, sizeof(msg), 0);
 }
 
@@ -267,19 +272,19 @@ int LiveSplitState(int socket, int currentState)
     {
         recv(socket, &serverResponse, sizeof(serverResponse), 0);
 
-        if(strcmp(serverResponse, MsgStateNotRunning) == 0)
+        if(strcmp(serverResponse, MSG_STATE_NOT_RUNNING) == 0)
         {
             status = 1;
         }
-        else if(strcmp(serverResponse, MsgStateRunning) == 0)
+        else if(strcmp(serverResponse, MSG_STATE_RUNNING) == 0)
         {
             status = 2;
         }
-        else if(strcmp(serverResponse, MsgStateEnded) == 0)
+        else if(strcmp(serverResponse, MSG_STATE_ENDED) == 0)
         {
             status = 3;
         }
-        else if(strcmp(serverResponse, MsgStatePaused) == 0)
+        else if(strcmp(serverResponse, MSG_STATE_PAUSED) == 0)
         {
             status = 4;
         }
@@ -287,10 +292,12 @@ int LiveSplitState(int socket, int currentState)
     
     return status;
 }
-#pragma endregion
 
+
+//////////////////////////////MAIN//////////////////////////////
 void app_main()
 {
+    /*
     //---GPIO SETUP---
     //Init fade - need to pass iram and shared flags for the
     //interrupt routine to work at the end of the fade
@@ -307,8 +314,8 @@ void app_main()
     gpio_install_isr_service(ESP_INTR_FLAG_IRAM);
 
     //Add interrupt handlers for both buttons
-    gpio_isr_handler_add(PauseBtnGPIO, PauseInterrupt, NULL);
-    gpio_isr_handler_add(SplitBtnGPIO, SplitInterrupt, NULL);
+    gpio_isr_handler_add(GPIO_BTN_PAUSE, PauseInterrupt, NULL);
+    gpio_isr_handler_add(GPIO_BTN_SPLIT, SplitInterrupt, NULL);
 
     //Setup GPIO input parameters
     ESP_ERROR_CHECK(gpio_config(&PauseBtnConfig));
@@ -322,16 +329,16 @@ void app_main()
     ESP_ERROR_CHECK(esp_event_handler_register(ETH_EVENT, ESP_EVENT_ANY_ID, &EthernetEvent, NULL));
 
     eth_mac_config_t macConfig = ETH_MAC_DEFAULT_CONFIG();
-    macConfig.smi_mdc_gpio_num = ETHMDCPin;
-    macConfig.smi_mdio_gpio_num = ETHMDIOPin;
+    macConfig.smi_mdc_gpio_num = PIN_ETH_MDC;
+    macConfig.smi_mdio_gpio_num = PIN_ETH_MDIO;
 
     eth_phy_config_t phyConfig = ETH_PHY_DEFAULT_CONFIG();
     phyConfig.phy_addr = 0;     //Any address is ok, we have only 1 connection
 
     //Set the eth physical layer enable pin high
-    gpio_pad_select_gpio(PHYPowerPin);
-    gpio_set_direction(PHYPowerPin, GPIO_MODE_OUTPUT);
-    gpio_set_level(PHYPowerPin, 1);
+    gpio_pad_select_gpio(PIN_PHY_POWER);
+    gpio_set_direction(PIN_PHY_POWER, GPIO_MODE_OUTPUT);
+    gpio_set_level(PIN_PHY_POWER, 1);
     vTaskDelay(pdMS_TO_TICKS(10));  //Wait 10ms for the enable to take effect? Is this needed?
 
     //Initialize ethernet PHY, lan8720 config (RJ45 port)
@@ -349,8 +356,8 @@ void app_main()
     struct sockaddr_in serverAddr = 
     {
         .sin_family = AF_INET,
-        .sin_port = htons(LiveSplitPort),
-        .sin_addr.s_addr = inet_addr(LiveSplitIP)
+        .sin_port = htons(LIVESPLIT_PORT),
+        .sin_addr.s_addr = inet_addr(LIVESPLIT_IP)
     };
 
     //Connect to the server (LiveSplit)
@@ -359,12 +366,21 @@ void app_main()
     //Connection failure
     if(connectionStatus == -1)
     {
-        printf("Error connecting to LiveSplit!");
+        printf("Error connecting to LiveSplit!\n");
     }
+    */
+
+    //TEST
+    gpio_config(&SplitBtnConfig);
+    gpio_config(&PauseBtnConfig);
+    ledc_channel_config(&SplitLEDChannelConfig);
+    ledc_timer_config(&SplitLEDPWMConfig);
 
     //---MAIN LOOP---
     while(1)
     {
+        /* COMMENTED OUT FOR LED TESTING
+
         int NewState;
 
         //Poll timer state
@@ -382,5 +398,25 @@ void app_main()
 
         //100ms delay
         vTaskDelay(pdMS_TO_TICKS(100));
+        */
+
+        int splitLevel = gpio_get_level(GPIO_BTN_SPLIT);
+        int pauseLevel = gpio_get_level(GPIO_BTN_PAUSE);
+
+        printf("Split: %d\n", splitLevel);
+        printf("Pause: %d\n", pauseLevel);
+
+        if(splitLevel == 0)
+        {
+            ledc_set_duty(SplitLEDChannelConfig.speed_mode, SplitLEDChannelConfig.channel, LED_DUTY_MAX);            
+        }
+        else
+        {
+            ledc_set_duty(SplitLEDChannelConfig.speed_mode, SplitLEDChannelConfig.channel, 0);
+        }
+
+        ledc_update_duty(SplitLEDChannelConfig.speed_mode, SplitLEDChannelConfig.channel);
+
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
