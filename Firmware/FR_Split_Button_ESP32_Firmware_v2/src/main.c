@@ -395,10 +395,12 @@ void TestSetup()
     ledc_timer_config(&SplitLEDPWMConfig);
 
     ledc_fade_func_install(ESP_INTR_FLAG_IRAM|ESP_INTR_FLAG_SHARED);
-    ledc_isr_register(LEDCInterrupt, NULL, ESP_INTR_FLAG_IRAM|ESP_INTR_FLAG_SHARED, NULL);
+    //ledc_isr_register(LEDCInterrupt, NULL, ESP_INTR_FLAG_IRAM|ESP_INTR_FLAG_SHARED, NULL);
 
-    gpio_install_isr_service(ESP_INTR_FLAG_IRAM|ESP_INTR_FLAG_SHARED);
+    //gpio_install_isr_service(ESP_INTR_FLAG_IRAM|ESP_INTR_FLAG_SHARED);
 }
+
+int phase = 0;
 
 void TestLoop()
 {
@@ -406,9 +408,10 @@ void TestLoop()
     int pauseLevel = gpio_get_level(GPIO_BTN_PAUSE);
 
     //printf("Split: %d\n", splitLevel);
-    //printf("Pause: %d\n", pauseLevel);
-    printf("State: %d\n", TimerState);
+    printf("Pause: %d\n", pauseLevel);
+    //printf("State: %d\n", TimerState);
 
+    /*
     if(splitLevel == 0)
     {
         TimerState++;
@@ -420,6 +423,16 @@ void TestLoop()
 
         LEDCInterrupt(NULL);
     }
+    */
+
+    phase += LED_DUTY_MAX;     
+
+    if(phase > LED_DUTY_MAX)
+    {
+        phase = 0;
+    }
+        
+    LEDFade(SplitLEDChannelConfig, phase, TIME_FADE_STANDBY);
 }
 
 
