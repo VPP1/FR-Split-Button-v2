@@ -1,9 +1,7 @@
 
 /*
 TODO:
-Test btn interrupts
-Figure out why ledc interrupts crash the board
-https://esp32.com/viewtopic.php?f=13&t=3458&start=10
+Expand the usb slot
 
 TCP/IP communication:
 - untested: initialization
@@ -46,9 +44,9 @@ command to a custom timer which is done via LiveSplit Core or something similar?
 #define PIN_ETH_MDIO 18
 
 //LED dynamization parameters, in milliseconds
-#define TIME_FADE_STANDBY 1000
-#define TIME_FADE_TIMER_FINISHED 100
-#define TIME_FADE_TIMER_PAUSED 200
+#define TIME_FADE_STANDBY 4000
+#define TIME_FADE_TIMER_FINISHED 500
+#define TIME_FADE_TIMER_PAUSED 50
 
 //Max led brightness
 //Since we are using 5kHz PWM freqeuncy defined in ledc_timer_config_t,
@@ -88,6 +86,17 @@ static int TimerState = TimerDefault;
 //False = at 0
 static bool PWMPhase = false;
 
+//Button falling edge debouncing variables
+//Filters out extra interrupt triggers upon pressing a button
+//Without filtering, the interrupts can trigger up to 20 times when pressing a button
+//Define time in milliseconds at pdMS_TO_TICKS()
+unsigned long TrgDebouncingLimit = pdMS_TO_TICKS(250);
+unsigned long TrgTickStampSplit = 0;
+unsigned long TrgPrevTickStampSplit = 0;
+unsigned long TrgTickStampPause = 0;
+unsigned long TrgPrevTickStampPause = 0;
+
+
 //////////////////////////////CONFIGURATIONS//////////////////////////////
 //PWM configuration
 const static ledc_timer_config_t SplitLEDPWMConfig =
@@ -107,6 +116,7 @@ const static ledc_channel_config_t SplitLEDChannelConfig =
     .speed_mode = LEDC_HIGH_SPEED_MODE,
     .hpoint     = 0,
     .timer_sel  = LEDC_TIMER_0
+    //.intr_type = LEDC_INTR_FADE_END
 };
 
 //Button I/O config - input pullup
@@ -129,6 +139,7 @@ const static gpio_config_t SplitBtnConfig =
 };
 
 
+//////////////////////////////LED CONTROL//////////////////////////////
 //Set LED fading towards the wanted duty cycle
 void LEDFade(ledc_channel_config_t led, uint32_t duty, int fadeTime)
 {
@@ -136,15 +147,29 @@ void LEDFade(ledc_channel_config_t led, uint32_t duty, int fadeTime)
     ledc_fade_start(led.speed_mode, led.channel, LEDC_FADE_NO_WAIT);
 }
 
+//Checks if the LED has reached max duty
+//Another option would have been to attach an interrupt to the fade function completing,
+//but it crashes the CPU and I couldn't figure out how to fix it.
+bool CheckLEDFadeProgress(ledc_channel_config_t cfg, uint32_t maxDuty)
+{
+    uint32_t ledDuty = ledc_get_duty(cfg.speed_mode, cfg.channel);
 
-//////////////////////////////Interrupts (buttons, LEDC fade completion)//////////////////////////////
-//Executes automatically once ledc_set_fade_with_time is done
-//Also called when we want to update the LED after state change
-void IRAM_ATTR LEDCInterrupt(void *param)
+    if((ledDuty >= maxDuty) || (ledDuty == 0))
+    {
+        return true;
+    }
+    else
+    {
+        return false;
+    }
+}
+
+//Called periodicaly whenever the LED duty has reached bottom or top limit, or when the LED is in a static state
+void UpdateLEDState()
 {
     //Determine next duty value
     uint32_t duty;
-
+   
     PWMPhase = !PWMPhase; //Phase has reached the other end
 
     if(PWMPhase)
@@ -179,62 +204,87 @@ void IRAM_ATTR LEDCInterrupt(void *param)
             PWMPhase = false;
             break;
     }
-
-    printf("LED updated\n");
 }
 
+
+//////////////////////////////INTERRUPTS (BUTTONS)//////////////////////////////
+//Checks if enough ticks have passed since the last interrupt
+bool FallingEdgeDebouncing(unsigned long *tickStamp, unsigned long *prevTickStamp, unsigned long debouncingLimit)
+{
+    *tickStamp = xTaskGetTickCount();
+
+    if((*tickStamp - debouncingLimit) > *prevTickStamp)
+    {
+        *prevTickStamp = *tickStamp;
+        return true;
+    }
+    else
+    {
+        return false;
+    }
+}
+
+//Pause button interrupt, gets called every time an falling edge is detected
 void IRAM_ATTR PauseInterrupt(void *param)
 {
-    //If the timer is in progress, pause timer
-    //If the timer is paused, resume timer
-    if(TimerState == TimerRunning)
-    {
-        TimerState = TimerPaused; //TODO: replace with command to livesplit
-    }
-    else if(TimerState == TimerPaused)
-    {
-        TimerState = TimerRunning;
-    }
+    //If enough time has passed for the interrupt call to be concidered legimate, send command
+    bool newPress = FallingEdgeDebouncing(&TrgTickStampPause, &TrgPrevTickStampPause, TrgDebouncingLimit);
 
-    //TODO: for testing, change this to be called when we get new state value from timer
-    LEDCInterrupt(NULL);
+    if(newPress)
+    {
+        //If the timer is in progress, pause timer
+        //If the timer is paused, resume timer
+        if(TimerState == TimerRunning)
+        {
+            TimerState = TimerPaused; //TODO: replace with command to livesplit
+        }
+        else if(TimerState == TimerPaused)
+        {
+            TimerState = TimerRunning;
+        }
 
-    printf("Pause interrupt, state: %d\n", TimerState);
+        //TODO: for testing, change this to be called when we get new state value from timer
+        UpdateLEDState();
+    }        
 }
 
+//Split button interrupt
 void IRAM_ATTR SplitInterrupt(void *param)
 {
-    switch(TimerState)
+    //If enough time has passed for the interrupt call to be concidered legimate, send command
+    bool newPress = FallingEdgeDebouncing(&TrgTickStampSplit, &TrgPrevTickStampSplit, TrgDebouncingLimit);
+
+    if(newPress)
     {
-        case TimerDefault:     //Timer is in unknown state, set to standby
-            TimerState = TimerStandby;
-            break;
-        case TimerStandby:     //Timer is in standby, start timer
-            TimerState = TimerRunning;
-            break;
-        case TimerRunning:     //Timer is running, stop timer
-            TimerState = TimerFinished;
-            break;
-        case TimerFinished:     //Timer is finished, reset timer
-            TimerState = TimerStandby;
-            break;
-        case TimerPaused:     //Timer is paused, resume timer
-            TimerState = TimerRunning;
-            break;
-        default:
-            TimerState = TimerDefault;
-            break;
+        switch(TimerState)
+        {
+            case TimerDefault:     //Timer is in unknown state, set to standby
+                TimerState = TimerStandby;
+                break;
+            case TimerStandby:     //Timer is in standby, start timer
+                TimerState = TimerRunning;
+                break;
+            case TimerRunning:     //Timer is running, stop timer
+                TimerState = TimerFinished;
+                break;
+            case TimerFinished:     //Timer is finished, reset timer
+                TimerState = TimerStandby;
+                break;
+            case TimerPaused:     //Timer is paused, resume timer
+                TimerState = TimerRunning;
+                break;
+            default:
+                TimerState = TimerDefault;
+                break;
+        }
+
+        //TODO: for testing, change this to be called when we get new state value from timer
+        UpdateLEDState();
     }
-
-    //TODO: for testing, change this to be called when we get new state value from timer
-    LEDCInterrupt(NULL);
-
-    printf("Split interrupt, state: %d\n", TimerState);
 }
 
 
-
-//////////////////////////////Ethernet communication//////////////////////////////
+//////////////////////////////ETHERNET COMMUNICATION//////////////////////////////
 //Event handler for ethernet events, sets MAC-address upon connecting
 void EthernetEvent(void *arg, esp_event_base_t eventBase, int32_t eventID, void *eventData)
 {
@@ -313,27 +363,24 @@ int LiveSplitState(int socket, int currentState)
 //////////////////////////////SETUP//////////////////////////////
 void SetupGPIO()
 {
-    //Init fade - need to pass iram and shared flags for the
-    //interrupt routine to work at the end of the fade
-    ledc_fade_func_install(ESP_INTR_FLAG_IRAM|ESP_INTR_FLAG_SHARED);
-
-    //Register LEDC ISR service for interrupts
-    ledc_isr_register(LEDCInterrupt, NULL, ESP_INTR_FLAG_IRAM|ESP_INTR_FLAG_SHARED, NULL);
-
-    //Setup PWM output parameters
-    ESP_ERROR_CHECK(ledc_timer_config(&SplitLEDPWMConfig));
-    ESP_ERROR_CHECK(ledc_channel_config(&SplitLEDChannelConfig));
+    //Setup GPIO input parameters
+    ESP_ERROR_CHECK(gpio_config(&PauseBtnConfig));
+    ESP_ERROR_CHECK(gpio_config(&SplitBtnConfig));
 
     //Register GPIO ISR service for interrupts
-    gpio_install_isr_service(ESP_INTR_FLAG_IRAM);
+    //Shared interrupt flag(s) with the fade function
+    gpio_install_isr_service(ESP_INTR_FLAG_IRAM|ESP_INTR_FLAG_SHARED);
 
     //Add interrupt handlers for both buttons
     gpio_isr_handler_add(GPIO_BTN_PAUSE, PauseInterrupt, NULL);
     gpio_isr_handler_add(GPIO_BTN_SPLIT, SplitInterrupt, NULL);
 
-    //Setup GPIO input parameters
-    ESP_ERROR_CHECK(gpio_config(&PauseBtnConfig));
-    ESP_ERROR_CHECK(gpio_config(&SplitBtnConfig));
+    //Setup PWM output parameters
+    ESP_ERROR_CHECK(ledc_channel_config(&SplitLEDChannelConfig));
+    ESP_ERROR_CHECK(ledc_timer_config(&SplitLEDPWMConfig));
+
+    //Install fade functionality
+    ledc_fade_func_install(ESP_INTR_FLAG_IRAM|ESP_INTR_FLAG_SHARED);
 }
 
 void SetupEth()
@@ -386,67 +433,14 @@ void SetupEth()
 }
 
 
-//Test functions
-void TestSetup()
-{
-    gpio_config(&SplitBtnConfig);
-    gpio_config(&PauseBtnConfig);
-    ledc_channel_config(&SplitLEDChannelConfig);
-    ledc_timer_config(&SplitLEDPWMConfig);
-
-    ledc_fade_func_install(ESP_INTR_FLAG_IRAM|ESP_INTR_FLAG_SHARED);
-    //ledc_isr_register(LEDCInterrupt, NULL, ESP_INTR_FLAG_IRAM|ESP_INTR_FLAG_SHARED, NULL);
-
-    //gpio_install_isr_service(ESP_INTR_FLAG_IRAM|ESP_INTR_FLAG_SHARED);
-}
-
-int phase = 0;
-
-void TestLoop()
-{
-    int splitLevel = gpio_get_level(GPIO_BTN_SPLIT);
-    int pauseLevel = gpio_get_level(GPIO_BTN_PAUSE);
-
-    //printf("Split: %d\n", splitLevel);
-    printf("Pause: %d\n", pauseLevel);
-    //printf("State: %d\n", TimerState);
-
-    /*
-    if(splitLevel == 0)
-    {
-        TimerState++;
-
-        if(TimerState > 4)
-        {
-            TimerState = 0;
-        }
-
-        LEDCInterrupt(NULL);
-    }
-    */
-
-    phase += LED_DUTY_MAX;     
-
-    if(phase > LED_DUTY_MAX)
-    {
-        phase = 0;
-    }
-        
-    LEDFade(SplitLEDChannelConfig, phase, TIME_FADE_STANDBY);
-}
-
-
 
 
 
 //////////////////////////////MAIN//////////////////////////////
 void app_main()
 {
-    //SetupGPIO();
+    SetupGPIO();
     //SetupEth();    
-
-    TestSetup();
-
 
     //---MAIN LOOP---
     while(1)
@@ -469,11 +463,14 @@ void app_main()
         }
         */
 
+        bool ledFadeComplete = CheckLEDFadeProgress(SplitLEDChannelConfig, LED_DUTY_MAX);
+
+        if(ledFadeComplete)
+        {
+            UpdateLEDState();
+        }
+
         //100ms delay
-        //vTaskDelay(pdMS_TO_TICKS(100));
-        vTaskDelay(pdMS_TO_TICKS(1000));
-
-       TestLoop();
-
+        vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
