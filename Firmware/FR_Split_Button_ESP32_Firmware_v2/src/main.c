@@ -2,7 +2,8 @@
 /*
 TODO:
 Test btn interrupts
-GPIO comfirmed working
+Figure out why ledc interrupts crash the board
+https://esp32.com/viewtopic.php?f=13&t=3458&start=10
 
 TCP/IP communication:
 - untested: initialization
@@ -178,6 +179,8 @@ void IRAM_ATTR LEDCInterrupt(void *param)
             PWMPhase = false;
             break;
     }
+
+    printf("LED updated\n");
 }
 
 void IRAM_ATTR PauseInterrupt(void *param)
@@ -195,6 +198,8 @@ void IRAM_ATTR PauseInterrupt(void *param)
 
     //TODO: for testing, change this to be called when we get new state value from timer
     LEDCInterrupt(NULL);
+
+    printf("Pause interrupt, state: %d\n", TimerState);
 }
 
 void IRAM_ATTR SplitInterrupt(void *param)
@@ -223,6 +228,8 @@ void IRAM_ATTR SplitInterrupt(void *param)
 
     //TODO: for testing, change this to be called when we get new state value from timer
     LEDCInterrupt(NULL);
+
+    printf("Split interrupt, state: %d\n", TimerState);
 }
 
 
@@ -386,6 +393,11 @@ void TestSetup()
     gpio_config(&PauseBtnConfig);
     ledc_channel_config(&SplitLEDChannelConfig);
     ledc_timer_config(&SplitLEDPWMConfig);
+
+    ledc_fade_func_install(ESP_INTR_FLAG_IRAM|ESP_INTR_FLAG_SHARED);
+    ledc_isr_register(LEDCInterrupt, NULL, ESP_INTR_FLAG_IRAM|ESP_INTR_FLAG_SHARED, NULL);
+
+    gpio_install_isr_service(ESP_INTR_FLAG_IRAM|ESP_INTR_FLAG_SHARED);
 }
 
 void TestLoop()
@@ -393,21 +405,21 @@ void TestLoop()
     int splitLevel = gpio_get_level(GPIO_BTN_SPLIT);
     int pauseLevel = gpio_get_level(GPIO_BTN_PAUSE);
 
-    printf("Split: %d\n", splitLevel);
-    printf("Pause: %d\n", pauseLevel);
+    //printf("Split: %d\n", splitLevel);
+    //printf("Pause: %d\n", pauseLevel);
+    printf("State: %d\n", TimerState);
 
     if(splitLevel == 0)
     {
-        ledc_set_duty(SplitLEDChannelConfig.speed_mode, SplitLEDChannelConfig.channel, LED_DUTY_MAX);            
-    }
-    else
-    {
-        ledc_set_duty(SplitLEDChannelConfig.speed_mode, SplitLEDChannelConfig.channel, 0);
-    }
+        TimerState++;
 
-    ledc_update_duty(SplitLEDChannelConfig.speed_mode, SplitLEDChannelConfig.channel);
+        if(TimerState > 4)
+        {
+            TimerState = 0;
+        }
 
-    vTaskDelay(pdMS_TO_TICKS(1000));
+        LEDCInterrupt(NULL);
+    }
 }
 
 
@@ -442,11 +454,13 @@ void app_main()
             TimerState = NewState;
             LEDCInterrupt(NULL);
         }
-
-        //100ms delay
-        vTaskDelay(pdMS_TO_TICKS(100));
         */
 
+        //100ms delay
+        //vTaskDelay(pdMS_TO_TICKS(100));
+        vTaskDelay(pdMS_TO_TICKS(1000));
+
        TestLoop();
+
     }
 }
