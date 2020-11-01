@@ -9,6 +9,10 @@ TCP/IP communication:
 - not done: replacing test things in button interrupts to actually sending livesplit commands
 
 Notes:
+Add/change to sdkconfig:
+CONFIG_ETH_RMII_CLK_OUTPUT=y
+CONFIG_ETH_RMII_CLK_OUT_GPIO =17
+
 Is static IP addressing for the buttons needed? We only need to know the
 LiveSplit Server's IP.
 
@@ -96,6 +100,9 @@ unsigned long TrgPrevTickStampSplit = 0;
 unsigned long TrgTickStampPause = 0;
 unsigned long TrgPrevTickStampPause = 0;
 
+//Network socket
+int NetworkSocket = 0;
+
 
 //////////////////////////////CONFIGURATIONS//////////////////////////////
 //PWM configuration
@@ -137,6 +144,113 @@ const static gpio_config_t SplitBtnConfig =
     .pin_bit_mask = (1ULL<<GPIO_BTN_SPLIT),
     .pull_up_en = GPIO_PULLUP_ENABLE
 };
+
+
+//////////////////////////////ETHERNET COMMUNICATION//////////////////////////////
+//Event handler for ethernet events, sets MAC-address upon connecting
+void EthernetEvent(void *arg, esp_event_base_t eventBase, int32_t eventID, void *eventData)
+{
+    uint8_t macAddr[6] = {0};
+    esp_eth_handle_t ethHandle = *(esp_eth_handle_t *)eventData;
+
+    if(eventID == ETHERNET_EVENT_CONNECTED)
+    {
+        esp_eth_ioctl(ethHandle, ETH_CMD_G_MAC_ADDR, macAddr);
+    }
+}
+
+
+//Event handler for getting an IP address
+static void GotIPEvent(void *arg, esp_event_base_t eventBase,
+                                 int32_t eventID, void *eventData)
+{
+    ip_event_got_ip_t *event = (ip_event_got_ip_t *) eventData;
+    const tcpip_adapter_ip_info_t *ip_info = &event->ip_info;
+
+    printf("ETHIP:" IPSTR, IP2STR(&ip_info->ip));
+
+    //Create a socket
+    NetworkSocket = socket(AF_INET, SOCK_STREAM, 0);
+    
+    //Specify IP-address for the socket
+    struct sockaddr_in serverAddr =
+    {
+        .sin_family = AF_INET,
+        .sin_port = htons(LIVESPLIT_PORT),
+        .sin_addr.s_addr = inet_addr(LIVESPLIT_IP)
+    };
+
+    //Connect to the server (LiveSplit)
+    int connectionStatus = connect(NetworkSocket, (struct sockaddr *) &serverAddr, sizeof(serverAddr));
+
+    //Connection failure
+    if(connectionStatus == -1)
+    {
+        printf("Error connecting to LiveSplit!\n");
+    }
+}
+
+
+//Sends a command to LiveSplit server
+void LiveSplitQuery(int socket, char command[256])
+{
+    char msg[256];
+    strcpy(msg, command);
+
+    send(socket, msg, sizeof(msg), 0);
+}
+
+
+//Reads a response from LiveSplit server and determines the timer state
+int LiveSplitState(int socket, int currentState)
+{
+    int status = 0;
+    char serverResponse[256];
+
+    //Setup socket monitoring, wait for 20000us before timing out
+    int dataAvailable = 0;
+    fd_set readFds;
+    struct timeval timeout =
+    {
+        .tv_sec = 0,
+        .tv_usec = 20000
+    };
+
+    FD_ZERO(&readFds);
+    FD_SET(socket, &readFds);
+
+    dataAvailable = select(socket+1, &readFds, NULL, NULL, &timeout);
+
+    //If no data is available, set current status
+    //If data is available, read it and determine the timer status
+    if(dataAvailable == 0)
+    {
+        status = currentState;
+    }
+    else
+    {
+        recv(socket, &serverResponse, sizeof(serverResponse), 0);
+
+        if(strcmp(serverResponse, MSG_STATE_NOT_RUNNING) == 0)
+        {
+            status = TimerStandby;
+        }
+        else if(strcmp(serverResponse, MSG_STATE_RUNNING) == 0)
+        {
+            status = TimerRunning;
+        }
+        else if(strcmp(serverResponse, MSG_STATE_ENDED) == 0)
+        {
+            status = TimerFinished;
+        }
+        else if(strcmp(serverResponse, MSG_STATE_PAUSED) == 0)
+        {
+            status = TimerPaused;
+        }
+    }
+    
+    return status;
+}
 
 
 //////////////////////////////LED CONTROL//////////////////////////////
@@ -232,6 +346,9 @@ void IRAM_ATTR PauseInterrupt(void *param)
 
     if(newPress)
     {
+        LiveSplitQuery(NetworkSocket, CMD_PAUSE);
+
+        /* TEST:
         //If the timer is in progress, pause timer
         //If the timer is paused, resume timer
         if(TimerState == TimerRunning)
@@ -245,6 +362,7 @@ void IRAM_ATTR PauseInterrupt(void *param)
 
         //TODO: for testing, change this to be called when we get new state value from timer
         UpdateLEDState();
+        */
     }        
 }
 
@@ -256,6 +374,9 @@ void IRAM_ATTR SplitInterrupt(void *param)
 
     if(newPress)
     {
+        LiveSplitQuery(NetworkSocket, CMD_SPLIT);
+
+        /* TEST:
         switch(TimerState)
         {
             case TimerDefault:     //Timer is in unknown state, set to standby
@@ -280,83 +401,8 @@ void IRAM_ATTR SplitInterrupt(void *param)
 
         //TODO: for testing, change this to be called when we get new state value from timer
         UpdateLEDState();
+        */
     }
-}
-
-
-//////////////////////////////ETHERNET COMMUNICATION//////////////////////////////
-//Event handler for ethernet events, sets MAC-address upon connecting
-void EthernetEvent(void *arg, esp_event_base_t eventBase, int32_t eventID, void *eventData)
-{
-    uint8_t macAddr[6] = {0};
-    esp_eth_handle_t ethHandle = *(esp_eth_handle_t *)eventData;
-
-    if(eventID == ETHERNET_EVENT_CONNECTED)
-    {
-        esp_eth_ioctl(ethHandle, ETH_CMD_G_MAC_ADDR, macAddr);
-    }
-}
-
-
-//Sends a command to LiveSplit server
-void LiveSplitQuery(int socket, char *command)
-{
-    //char msg[256] = command; TODO: figure out how to pass the const string into this
-
-    char msg[256] = "startorsplit";
-    send(socket, msg, sizeof(msg), 0);
-}
-
-
-//Reads a response from LiveSplit server and determines the timer state
-int LiveSplitState(int socket, int currentState)
-{
-    int status = 0;
-    char serverResponse[256];
-
-    //Setup socket monitoring, wait for 20000us before timing out
-    int dataAvailable = 0;
-    fd_set readFds;
-    struct timeval timeout =
-    {
-        .tv_sec = 0,
-        .tv_usec = 20000
-    };
-
-    FD_ZERO(&readFds);
-    FD_SET(socket, &readFds);
-
-    dataAvailable = select(socket+1, &readFds, NULL, NULL, &timeout);
-
-    //If no data is available, set current status
-    //If data is available, read it and determine the timer status
-    if(dataAvailable == 0)
-    {
-        status = currentState;
-    }
-    else
-    {
-        recv(socket, &serverResponse, sizeof(serverResponse), 0);
-
-        if(strcmp(serverResponse, MSG_STATE_NOT_RUNNING) == 0)
-        {
-            status = TimerStandby;
-        }
-        else if(strcmp(serverResponse, MSG_STATE_RUNNING) == 0)
-        {
-            status = TimerRunning;
-        }
-        else if(strcmp(serverResponse, MSG_STATE_ENDED) == 0)
-        {
-            status = TimerFinished;
-        }
-        else if(strcmp(serverResponse, MSG_STATE_PAUSED) == 0)
-        {
-            status = TimerPaused;
-        }
-    }
-    
-    return status;
 }
 
 
@@ -385,17 +431,24 @@ void SetupGPIO()
 
 void SetupEth()
 {
+    vTaskDelay(pdMS_TO_TICKS(500));  //Oscilator start up delay
+
     tcpip_adapter_init();
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     ESP_ERROR_CHECK(tcpip_adapter_set_default_eth_handlers());
     ESP_ERROR_CHECK(esp_event_handler_register(ETH_EVENT, ESP_EVENT_ANY_ID, &EthernetEvent, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP, &GotIPEvent, NULL));
 
+    //MAC config
     eth_mac_config_t macConfig = ETH_MAC_DEFAULT_CONFIG();
     macConfig.smi_mdc_gpio_num = PIN_ETH_MDC;
     macConfig.smi_mdio_gpio_num = PIN_ETH_MDIO;
+    esp_eth_mac_t *ethMac = esp_eth_mac_new_esp32(&macConfig);
 
+    //PHY config
     eth_phy_config_t phyConfig = ETH_PHY_DEFAULT_CONFIG();
-    phyConfig.phy_addr = 0;     //Any address is ok, we have only 1 connection
+    phyConfig.phy_addr = 0;     //0: Any address is ok, we have only 1 connection
+    esp_eth_phy_t *ethPhy = esp_eth_phy_new_lan8720(&phyConfig);
 
     //Set the eth physical layer enable pin high
     gpio_pad_select_gpio(PIN_PHY_POWER);
@@ -403,33 +456,11 @@ void SetupEth()
     gpio_set_level(PIN_PHY_POWER, 1);
     vTaskDelay(pdMS_TO_TICKS(10));  //Wait 10ms for the enable to take effect? Is this needed?
 
-    //Initialize ethernet PHY, lan8720 config (RJ45 port)
-    esp_eth_mac_t *ethMac = esp_eth_mac_new_esp32(&macConfig);
-    esp_eth_phy_t *ethPhy = esp_eth_phy_new_lan8720(&phyConfig);
+    //Init ethernet, lan8720 config (RJ45 port)
     esp_eth_config_t ethConfig = ETH_DEFAULT_CONFIG(ethMac, ethPhy);
     esp_eth_handle_t ethHandle = NULL;
     ESP_ERROR_CHECK(esp_eth_driver_install(&ethConfig, &ethHandle));
     ESP_ERROR_CHECK(esp_eth_start(ethHandle));
-
-    //Create a socket
-    int networkSocket = socket(AF_INET, SOCK_STREAM, 0);
-    
-    //Specify IP-address for the socket
-    struct sockaddr_in serverAddr = 
-    {
-        .sin_family = AF_INET,
-        .sin_port = htons(LIVESPLIT_PORT),
-        .sin_addr.s_addr = inet_addr(LIVESPLIT_IP)
-    };
-
-    //Connect to the server (LiveSplit)
-    int connectionStatus = connect(networkSocket, (struct sockaddr *) &serverAddr, sizeof(serverAddr));
-
-    //Connection failure
-    if(connectionStatus == -1)
-    {
-        printf("Error connecting to LiveSplit!\n");
-    }
 }
 
 
@@ -440,28 +471,25 @@ void SetupEth()
 void app_main()
 {
     SetupGPIO();
-    //SetupEth();    
+    SetupEth();    
 
     //---MAIN LOOP---
     while(1)
     {
-        /* COMMENTED OUT FOR LED TESTING
-
         int NewState;
 
         //Poll timer state
-        LiveSplitQuery(networkSocket, CommandGetState);
+        LiveSplitQuery(NetworkSocket, CMD_GET_STATE);
 
         //Check if got response to timer state poll
-        NewState = LiveSplitState(networkSocket, TimerState);
+        NewState = LiveSplitState(NetworkSocket, TimerState);
 
         //If we got a new state value from LiveSplit, call LEDCInterrput to update the split btn led
         if(NewState != TimerState)
         {
             TimerState = NewState;
-            LEDCInterrupt(NULL);
+            UpdateLEDState();
         }
-        */
 
         bool ledFadeComplete = CheckLEDFadeProgress(SplitLEDChannelConfig, LED_DUTY_MAX);
 
