@@ -2,6 +2,12 @@
 /*
 TODO:
 Expand the usb slot
+If split/pause button is held down long enough, a message is sent on the depress too
+
+Changed connection status to a global variable so it can be monitored
+Project did not build anymore. Missing CMake dir and something else
+Tried to update PIO, did not help. Updating introduced some intellisense errors
+which were not present before....
 
 TCP/IP communication:
 - untested: initialization
@@ -13,16 +19,12 @@ Add/change to sdkconfig:
 CONFIG_ETH_RMII_CLK_OUTPUT=y
 CONFIG_ETH_RMII_CLK_OUT_GPIO =17
 
-Is static IP addressing for the buttons needed? We only need to know the
-LiveSplit Server's IP.
-
 How is multiple buttons during a race handled? Probably some kind of a custom
 command to a custom timer which is done via LiveSplit Core or something similar?
 */
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdbool.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -38,6 +40,7 @@ command to a custom timer which is done via LiveSplit Core or something similar?
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
+
 
 //I/O
 #define GPIO_BTN_PAUSE 14     //Input_pullup (UEXT)
@@ -58,14 +61,25 @@ command to a custom timer which is done via LiveSplit Core or something similar?
 //0% - 100% duty => 0 - 8192 duty variable
 #define LED_DUTY_MAX 8192
 
+//Local address
+#define LOCAL_IP "192.168.0.21"
+#define SUBNETMASK "255.255.255.0"
+
 //LiveSplit Server IP/Port
-#define LIVESPLIT_IP "192.168.1.1"
+#define LIVESPLIT_IP "192.168.0.11"
 #define LIVESPLIT_PORT 16834
 
 //LiveSplit Server command/status messages
-#define CMD_SPLIT "startorsplit"
-#define CMD_PAUSE "pause"
-#define CMD_GET_STATE "getcurrenttimerphase"
+/*
+#define CMD_SPLIT "startorsplit\r\n"
+#define CMD_PAUSE "pause\r\n"
+#define CMD_GET_STATE "getcurrenttimerphase\r\n"
+*/
+
+#define CMD_SPLIT "startorsplit<EOF>"
+#define CMD_PAUSE "pause<EOF>"
+#define CMD_GET_STATE "getcurrenttimerphase<EOF>"
+
 #define MSG_STATE_NOT_RUNNING "NotRunning"
 #define MSG_STATE_RUNNING "Running"
 #define MSG_STATE_ENDED "Ended"
@@ -86,9 +100,9 @@ const static int TimerPaused = 4;
 static int TimerState = TimerDefault;
 
 //PWM phase flag
-//True = at max duty
-//False = at 0
-static bool PWMPhase = false;
+//1 = at max duty
+//0 = at min duty (0)
+static int PWMPhase = 0;
 
 //Button falling edge debouncing variables
 //Filters out extra interrupt triggers upon pressing a button
@@ -103,6 +117,12 @@ unsigned long TrgPrevTickStampPause = 0;
 //Network socket
 int NetworkSocket = 0;
 
+//Command sending flags
+int SendSplit = 0;
+int SendPause = 0;
+
+
+int CStatus = -9999;
 
 //////////////////////////////CONFIGURATIONS//////////////////////////////
 //PWM configuration
@@ -148,27 +168,10 @@ const static gpio_config_t SplitBtnConfig =
 
 //////////////////////////////ETHERNET COMMUNICATION//////////////////////////////
 //Event handler for ethernet events, sets MAC-address upon connecting
-void EthernetEvent(void *arg, esp_event_base_t eventBase, int32_t eventID, void *eventData)
+//Connect to livesplit server. Keep retrying until a successfull connection is made
+/*
+static void LiveSplitConnect()
 {
-    uint8_t macAddr[6] = {0};
-    esp_eth_handle_t ethHandle = *(esp_eth_handle_t *)eventData;
-
-    if(eventID == ETHERNET_EVENT_CONNECTED)
-    {
-        esp_eth_ioctl(ethHandle, ETH_CMD_G_MAC_ADDR, macAddr);
-    }
-}
-
-
-//Event handler for getting an IP address
-static void GotIPEvent(void *arg, esp_event_base_t eventBase,
-                                 int32_t eventID, void *eventData)
-{
-    ip_event_got_ip_t *event = (ip_event_got_ip_t *) eventData;
-    const tcpip_adapter_ip_info_t *ip_info = &event->ip_info;
-
-    printf("ETHIP:" IPSTR, IP2STR(&ip_info->ip));
-
     //Create a socket
     NetworkSocket = socket(AF_INET, SOCK_STREAM, 0);
     
@@ -181,13 +184,52 @@ static void GotIPEvent(void *arg, esp_event_base_t eventBase,
     };
 
     //Connect to the server (LiveSplit)
-    int connectionStatus = connect(NetworkSocket, (struct sockaddr *) &serverAddr, sizeof(serverAddr));
+    //Only print out error message if first attempt does not go through
+    int connectionStatus = -1;  //connect returns -1 on failed attempt
+    int firstAttempt = 1;
 
-    //Connection failure
-    if(connectionStatus == -1)
+    while(connectionStatus == -1)
     {
-        printf("Error connecting to LiveSplit!\n");
+        if(firstAttempt == 0)
+        {
+            vTaskDelay(pdMS_TO_TICKS(2000));
+            printf("Error connecting to LiveSplit! Retrying...\n");
+        }
+
+        firstAttempt = 0;
+        connectionStatus = connect(NetworkSocket, (struct sockaddr *) &serverAddr, sizeof(serverAddr));
     }
+
+    printf("Connected to LiveSplit.\n");
+}
+*/
+
+static void LiveSplitConnect()
+{  
+    //Specify IP-address for the socket
+    struct sockaddr_in serverAddr =
+    {
+        .sin_family = AF_INET,
+        .sin_port = htons(LIVESPLIT_PORT),
+        .sin_addr.s_addr = inet_addr(LIVESPLIT_IP)
+    };
+
+    //Create a socket
+    //NetworkSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
+    int networkSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
+
+    if(networkSocket < 0)
+    {
+        printf("Unable to create socket.\n");
+    }
+
+    //Connect to the server (LiveSplit)
+    //Only print out error message if first attempt does not go through
+    printf("Trying to connect to %d\n", serverAddr.sin_addr.s_addr);
+
+    //int connectionStatus = connect(networkSocket, (struct sockaddr *) &serverAddr, sizeof(struct sockaddr));
+    CStatus = connect(networkSocket, (struct sockaddr *) &serverAddr, sizeof(struct sockaddr));
+    int firstAttempt = 1;
 }
 
 
@@ -196,6 +238,8 @@ void LiveSplitQuery(int socket, char command[256])
 {
     char msg[256];
     strcpy(msg, command);
+
+    printf("Sending CMD: %s\n", msg);
 
     send(socket, msg, sizeof(msg), 0);
 }
@@ -253,6 +297,45 @@ int LiveSplitState(int socket, int currentState)
 }
 
 
+void EthernetEvent(void *arg, esp_event_base_t eventBase, int32_t eventID, void *eventData)
+{
+    uint8_t macAddr[6] = {0};
+    esp_eth_handle_t ethHandle = *(esp_eth_handle_t *)eventData;
+
+    tcpip_adapter_ip_info_t ipInfo =
+    {
+        .ip.addr = ipaddr_addr(LOCAL_IP),
+        .gw.addr = ipaddr_addr("192.168.0.0"),
+        .netmask.addr = ipaddr_addr(SUBNETMASK)
+    };
+
+    if(eventID == ETHERNET_EVENT_CONNECTED)
+    {
+        esp_eth_ioctl(ethHandle, ETH_CMD_G_MAC_ADDR, macAddr);
+
+        ESP_ERROR_CHECK(tcpip_adapter_dhcpc_stop(TCPIP_ADAPTER_IF_ETH)); 
+        ESP_ERROR_CHECK(tcpip_adapter_set_ip_info(TCPIP_ADAPTER_IF_ETH, &ipInfo));  //Set static IP
+
+        printf("Ethernet MAC Addr: %02x:%02x:%02x:%02x:%02x:%02x\n",
+                 macAddr[0], macAddr[1], macAddr[2], macAddr[3], macAddr[4], macAddr[5]);
+    }
+}
+
+
+//Event handler for getting an IP address
+static void GotIPEvent(void *arg, esp_event_base_t eventBase,
+                                 int32_t eventID, void *eventData)
+{
+    ip_event_got_ip_t *event = (ip_event_got_ip_t *) eventData;
+    const tcpip_adapter_ip_info_t *ip_info = &event->ip_info;
+
+    printf("Got IP: " IPSTR, IP2STR(&ip_info->ip));
+    printf("\n");
+
+    LiveSplitConnect();
+}
+
+
 //////////////////////////////LED CONTROL//////////////////////////////
 //Set LED fading towards the wanted duty cycle
 void LEDFade(ledc_channel_config_t led, uint32_t duty, int fadeTime)
@@ -264,17 +347,17 @@ void LEDFade(ledc_channel_config_t led, uint32_t duty, int fadeTime)
 //Checks if the LED has reached max duty
 //Another option would have been to attach an interrupt to the fade function completing,
 //but it crashes the CPU and I couldn't figure out how to fix it.
-bool CheckLEDFadeProgress(ledc_channel_config_t cfg, uint32_t maxDuty)
+int CheckLEDFadeProgress(ledc_channel_config_t cfg, uint32_t maxDuty)
 {
     uint32_t ledDuty = ledc_get_duty(cfg.speed_mode, cfg.channel);
 
     if((ledDuty >= maxDuty) || (ledDuty == 0))
     {
-        return true;
+        return 1;
     }
     else
     {
-        return false;
+        return 0;
     }
 }
 
@@ -286,7 +369,7 @@ void UpdateLEDState()
    
     PWMPhase = !PWMPhase; //Phase has reached the other end
 
-    if(PWMPhase)
+    if(PWMPhase == 1)
     {
         duty = 0; //At high phase, start going towards 0
     }
@@ -304,7 +387,7 @@ void UpdateLEDState()
         case TimerRunning:
             ledc_set_duty(SplitLEDChannelConfig.speed_mode, SplitLEDChannelConfig.channel, LED_DUTY_MAX);
             ledc_update_duty(SplitLEDChannelConfig.speed_mode, SplitLEDChannelConfig.channel);
-            PWMPhase = true;
+            PWMPhase = 1;
             break;
         case TimerFinished:
             LEDFade(SplitLEDChannelConfig, duty, TIME_FADE_TIMER_FINISHED);
@@ -315,7 +398,7 @@ void UpdateLEDState()
         default:
             ledc_set_duty(SplitLEDChannelConfig.speed_mode, SplitLEDChannelConfig.channel, 0);
             ledc_update_duty(SplitLEDChannelConfig.speed_mode, SplitLEDChannelConfig.channel);
-            PWMPhase = false;
+            PWMPhase = 0;
             break;
     }
 }
@@ -323,18 +406,18 @@ void UpdateLEDState()
 
 //////////////////////////////INTERRUPTS (BUTTONS)//////////////////////////////
 //Checks if enough ticks have passed since the last interrupt
-bool FallingEdgeDebouncing(unsigned long *tickStamp, unsigned long *prevTickStamp, unsigned long debouncingLimit)
+int FallingEdgeDebouncing(unsigned long *tickStamp, unsigned long *prevTickStamp, unsigned long debouncingLimit)
 {
     *tickStamp = xTaskGetTickCount();
 
     if((*tickStamp - debouncingLimit) > *prevTickStamp)
     {
         *prevTickStamp = *tickStamp;
-        return true;
+        return 1;
     }
     else
     {
-        return false;
+        return 0;
     }
 }
 
@@ -342,11 +425,11 @@ bool FallingEdgeDebouncing(unsigned long *tickStamp, unsigned long *prevTickStam
 void IRAM_ATTR PauseInterrupt(void *param)
 {
     //If enough time has passed for the interrupt call to be concidered legimate, send command
-    bool newPress = FallingEdgeDebouncing(&TrgTickStampPause, &TrgPrevTickStampPause, TrgDebouncingLimit);
+    int newPress = FallingEdgeDebouncing(&TrgTickStampPause, &TrgPrevTickStampPause, TrgDebouncingLimit);
 
-    if(newPress)
+    if(newPress == 1)
     {
-        LiveSplitQuery(NetworkSocket, CMD_PAUSE);
+        SendPause = 1;  //Set flag for sending the command in main loop
 
         /* TEST:
         //If the timer is in progress, pause timer
@@ -370,11 +453,11 @@ void IRAM_ATTR PauseInterrupt(void *param)
 void IRAM_ATTR SplitInterrupt(void *param)
 {
     //If enough time has passed for the interrupt call to be concidered legimate, send command
-    bool newPress = FallingEdgeDebouncing(&TrgTickStampSplit, &TrgPrevTickStampSplit, TrgDebouncingLimit);
+    int newPress = FallingEdgeDebouncing(&TrgTickStampSplit, &TrgPrevTickStampSplit, TrgDebouncingLimit);
 
-    if(newPress)
+    if(newPress == 1)
     {
-        LiveSplitQuery(NetworkSocket, CMD_SPLIT);
+        SendSplit = 1;  //Set flag for sending the command in main loop
 
         /* TEST:
         switch(TimerState)
@@ -476,13 +559,25 @@ void app_main()
     //---MAIN LOOP---
     while(1)
     {
-        int NewState;
+        int NewState = 0;
 
+        if(SendSplit == 1)
+        {
+            LiveSplitQuery(NetworkSocket, CMD_SPLIT);
+            SendSplit = 0;
+        }
+
+        if(SendPause == 1)
+        {
+            LiveSplitQuery(NetworkSocket, CMD_PAUSE);
+            SendPause = 0;
+        }
+        
         //Poll timer state
-        LiveSplitQuery(NetworkSocket, CMD_GET_STATE);
+        //LiveSplitQuery(NetworkSocket, CMD_GET_STATE);
 
         //Check if got response to timer state poll
-        NewState = LiveSplitState(NetworkSocket, TimerState);
+        //NewState = LiveSplitState(NetworkSocket, TimerState);
 
         //If we got a new state value from LiveSplit, call LEDCInterrput to update the split btn led
         if(NewState != TimerState)
@@ -491,14 +586,17 @@ void app_main()
             UpdateLEDState();
         }
 
-        bool ledFadeComplete = CheckLEDFadeProgress(SplitLEDChannelConfig, LED_DUTY_MAX);
+        int ledFadeComplete = CheckLEDFadeProgress(SplitLEDChannelConfig, LED_DUTY_MAX);
 
-        if(ledFadeComplete)
+        if(ledFadeComplete == 1)
         {
             UpdateLEDState();
         }
 
         //100ms delay
         vTaskDelay(pdMS_TO_TICKS(100));
+
+        //Test: print connection status
+        //printf("Connection status: %d\n", CStatus);
     }
 }
