@@ -2,17 +2,7 @@
 /*
 TODO:
 Expand the usb slot
-If split/pause button is held down long enough, a message is sent on the depress too
-
-Changed connection status to a global variable so it can be monitored
-Project did not build anymore. Missing CMake dir and something else
-Tried to update PIO, did not help. Updating introduced some intellisense errors
-which were not present before....
-
-TCP/IP communication:
-- untested: initialization
-- untested: sending commands to livesplit & recieving timer status
-- not done: replacing test things in button interrupts to actually sending livesplit commands
+Fix button LED brightness upon starting a run. Now it can get stuck on the cycle which it was at standby.
 
 Notes:
 Add/change to sdkconfig:
@@ -51,6 +41,7 @@ command to a custom timer which is done via LiveSplit Core or something similar?
 #define PIN_ETH_MDIO 18
 
 //LED dynamization parameters, in milliseconds
+#define TIME_FADE_DEFAULT 100
 #define TIME_FADE_STANDBY 4000
 #define TIME_FADE_TIMER_FINISHED 500
 #define TIME_FADE_TIMER_PAUSED 50
@@ -70,15 +61,11 @@ command to a custom timer which is done via LiveSplit Core or something similar?
 #define LIVESPLIT_PORT 16834
 
 //LiveSplit Server command/status messages
-/*
 #define CMD_SPLIT "startorsplit\r\n"
 #define CMD_PAUSE "pause\r\n"
+#define CMD_RESUME "resume\r\n"
+#define CMD_RESET "reset\r\n"
 #define CMD_GET_STATE "getcurrenttimerphase\r\n"
-*/
-
-#define CMD_SPLIT "startorsplit<EOF>"
-#define CMD_PAUSE "pause<EOF>"
-#define CMD_GET_STATE "getcurrenttimerphase<EOF>"
 
 #define MSG_STATE_NOT_RUNNING "NotRunning"
 #define MSG_STATE_RUNNING "Running"
@@ -91,13 +78,13 @@ command to a custom timer which is done via LiveSplit Core or something similar?
 //2 = timer running
 //3 = timer finished (ended)
 //4 = timer paused
-const static int TimerDefault = 0;
-const static int TimerStandby = 1;
-const static int TimerRunning = 2;
-const static int TimerFinished = 3;
-const static int TimerPaused = 4;
+#define TIMER_STATE_DEFAULT 0
+#define TIMER_STATE_STANDBY 1
+#define TIMER_STATE_RUNNING 2
+#define TIMER_STATE_FINISHED 3
+#define TIMER_STATE_PAUSED 4
 
-static int TimerState = TimerDefault;
+static int TimerState = TIMER_STATE_DEFAULT;
 
 //PWM phase flag
 //1 = at max duty
@@ -108,21 +95,23 @@ static int PWMPhase = 0;
 //Filters out extra interrupt triggers upon pressing a button
 //Without filtering, the interrupts can trigger up to 20 times when pressing a button
 //Define time in milliseconds at pdMS_TO_TICKS()
-unsigned long TrgDebouncingLimit = pdMS_TO_TICKS(250);
-unsigned long TrgTickStampSplit = 0;
-unsigned long TrgPrevTickStampSplit = 0;
-unsigned long TrgTickStampPause = 0;
-unsigned long TrgPrevTickStampPause = 0;
+static unsigned long TrgDebouncingLimit = pdMS_TO_TICKS(250);
+static unsigned long TrgTickStampSplit = 0;
+static unsigned long TrgPrevTickStampSplit = 0;
+static unsigned long TrgTickStampPause = 0;
+static unsigned long TrgPrevTickStampPause = 0;
+
+//Button press flags
+static int SendSplit = 0;
+static int SendPause = 0;
 
 //Network socket
-int NetworkSocket = 0;
+static int NetworkSocket = 0;
 
-//Command sending flags
-int SendSplit = 0;
-int SendPause = 0;
+//Connection status monitoring
+static unsigned long LastResponseTimestamp = 0;
+static unsigned long ConnectionTimeout = pdMS_TO_TICKS(10000);
 
-
-int CStatus = -9999;
 
 //////////////////////////////CONFIGURATIONS//////////////////////////////
 //PWM configuration
@@ -167,9 +156,23 @@ const static gpio_config_t SplitBtnConfig =
 
 
 //////////////////////////////ETHERNET COMMUNICATION//////////////////////////////
+//Check if too long has passed since the last response from the server
+//0 = connection error, 1 = connection OK
+static int ConnectionStatusCheck()
+{
+    if((xTaskGetTickCount() - LastResponseTimestamp) > ConnectionTimeout)
+    {
+        return 0;
+    }
+    else
+    {
+        return 1;
+    }
+}
+
+
 //Event handler for ethernet events, sets MAC-address upon connecting
 //Connect to livesplit server. Keep retrying until a successfull connection is made
-/*
 static void LiveSplitConnect()
 {
     //Create a socket
@@ -192,7 +195,16 @@ static void LiveSplitConnect()
     {
         if(firstAttempt == 0)
         {
-            vTaskDelay(pdMS_TO_TICKS(2000));
+            //Flash led every 1s in indication of connection error
+            //TODO: LED flashing doesnt work, try to fix
+            ledc_set_duty(SplitLEDChannelConfig.speed_mode, SplitLEDChannelConfig.channel, LED_DUTY_MAX);
+            ledc_update_duty(SplitLEDChannelConfig.speed_mode, SplitLEDChannelConfig.channel);
+            vTaskDelay(pdMS_TO_TICKS(1000));
+
+            ledc_set_duty(SplitLEDChannelConfig.speed_mode, SplitLEDChannelConfig.channel, 0);
+            ledc_update_duty(SplitLEDChannelConfig.speed_mode, SplitLEDChannelConfig.channel);
+            vTaskDelay(pdMS_TO_TICKS(1000));
+
             printf("Error connecting to LiveSplit! Retrying...\n");
         }
 
@@ -202,53 +214,12 @@ static void LiveSplitConnect()
 
     printf("Connected to LiveSplit.\n");
 }
-*/
-
-static void LiveSplitConnect()
-{  
-    //Specify IP-address for the socket
-    struct sockaddr_in serverAddr =
-    {
-        .sin_family = AF_INET,
-        .sin_port = htons(LIVESPLIT_PORT),
-        .sin_addr.s_addr = inet_addr(LIVESPLIT_IP)
-    };
-
-    //Create a socket
-    //NetworkSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
-    int networkSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
-
-    if(networkSocket < 0)
-    {
-        printf("Unable to create socket.\n");
-    }
-
-    //Connect to the server (LiveSplit)
-    //Only print out error message if first attempt does not go through
-    printf("Trying to connect to %d\n", serverAddr.sin_addr.s_addr);
-
-    //int connectionStatus = connect(networkSocket, (struct sockaddr *) &serverAddr, sizeof(struct sockaddr));
-    CStatus = connect(networkSocket, (struct sockaddr *) &serverAddr, sizeof(struct sockaddr));
-    int firstAttempt = 1;
-}
-
-
-//Sends a command to LiveSplit server
-void LiveSplitQuery(int socket, char command[256])
-{
-    char msg[256];
-    strcpy(msg, command);
-
-    printf("Sending CMD: %s\n", msg);
-
-    send(socket, msg, sizeof(msg), 0);
-}
 
 
 //Reads a response from LiveSplit server and determines the timer state
 int LiveSplitState(int socket, int currentState)
 {
-    int status = 0;
+    int state = currentState;   //Init to current state, only update if data is available
     char serverResponse[256];
 
     //Setup socket monitoring, wait for 20000us before timing out
@@ -265,35 +236,36 @@ int LiveSplitState(int socket, int currentState)
 
     dataAvailable = select(socket+1, &readFds, NULL, NULL, &timeout);
 
-    //If no data is available, set current status
-    //If data is available, read it and determine the timer status
-    if(dataAvailable == 0)
+    //If data is available, read it and determine the timer state
+    if(dataAvailable != 0)
     {
-        status = currentState;
-    }
-    else
-    {
-        recv(socket, &serverResponse, sizeof(serverResponse), 0);
+        ssize_t len = recv(socket, &serverResponse, sizeof(serverResponse), 0);
 
-        if(strcmp(serverResponse, MSG_STATE_NOT_RUNNING) == 0)
+        if(len > 0)
         {
-            status = TimerStandby;
+            LastResponseTimestamp = xTaskGetTickCount();    //Save the tick timestamp for connection status monitoring
         }
-        else if(strcmp(serverResponse, MSG_STATE_RUNNING) == 0)
+
+        //Check if the predefined responses are included in the server response
+        if(strstr(serverResponse, MSG_STATE_NOT_RUNNING) != NULL)
         {
-            status = TimerRunning;
+            state = TIMER_STATE_STANDBY;
         }
-        else if(strcmp(serverResponse, MSG_STATE_ENDED) == 0)
+        else if(strstr(serverResponse, MSG_STATE_RUNNING) != NULL)
         {
-            status = TimerFinished;
+            state = TIMER_STATE_RUNNING;
         }
-        else if(strcmp(serverResponse, MSG_STATE_PAUSED) == 0)
+        else if(strstr(serverResponse, MSG_STATE_ENDED) != NULL)
         {
-            status = TimerPaused;
+            state = TIMER_STATE_FINISHED;
+        }
+        else if(strstr(serverResponse, MSG_STATE_PAUSED) != NULL)
+        {
+            state = TIMER_STATE_PAUSED;
         }
     }
     
-    return status;
+    return state;
 }
 
 
@@ -362,7 +334,7 @@ int CheckLEDFadeProgress(ledc_channel_config_t cfg, uint32_t maxDuty)
 }
 
 //Called periodicaly whenever the LED duty has reached bottom or top limit, or when the LED is in a static state
-void UpdateLEDState()
+void UpdateLEDState(int timerState)
 {
     //Determine next duty value
     uint32_t duty;
@@ -379,20 +351,25 @@ void UpdateLEDState()
     }
     
     //Set the led fading at a speed defined for each timer state, or set it a static on/off
-    switch(TimerState)
+    switch(timerState)
     {
-        case TimerStandby:
+        case TIMER_STATE_DEFAULT:
+            ledc_set_duty(SplitLEDChannelConfig.speed_mode, SplitLEDChannelConfig.channel, (LED_DUTY_MAX / 16));
+            ledc_update_duty(SplitLEDChannelConfig.speed_mode, SplitLEDChannelConfig.channel);
+            PWMPhase = 1;
+            break;
+        case TIMER_STATE_STANDBY:
             LEDFade(SplitLEDChannelConfig, duty, TIME_FADE_STANDBY);
             break;
-        case TimerRunning:
+        case TIMER_STATE_RUNNING:
             ledc_set_duty(SplitLEDChannelConfig.speed_mode, SplitLEDChannelConfig.channel, LED_DUTY_MAX);
             ledc_update_duty(SplitLEDChannelConfig.speed_mode, SplitLEDChannelConfig.channel);
             PWMPhase = 1;
             break;
-        case TimerFinished:
+        case TIMER_STATE_FINISHED:
             LEDFade(SplitLEDChannelConfig, duty, TIME_FADE_TIMER_FINISHED);
             break;
-        case TimerPaused:
+        case TIMER_STATE_PAUSED:
             LEDFade(SplitLEDChannelConfig, duty, TIME_FADE_TIMER_PAUSED);
             break;
         default:
@@ -424,67 +401,21 @@ int FallingEdgeDebouncing(unsigned long *tickStamp, unsigned long *prevTickStamp
 //Pause button interrupt, gets called every time an falling edge is detected
 void IRAM_ATTR PauseInterrupt(void *param)
 {
-    //If enough time has passed for the interrupt call to be concidered legimate, send command
-    int newPress = FallingEdgeDebouncing(&TrgTickStampPause, &TrgPrevTickStampPause, TrgDebouncingLimit);
-
-    if(newPress == 1)
+    //If enough time has passed for the interrupt call to be concidered legimate, set send command flag
+    if(FallingEdgeDebouncing(&TrgTickStampPause, &TrgPrevTickStampPause, TrgDebouncingLimit) == 1)
     {
-        SendPause = 1;  //Set flag for sending the command in main loop
-
-        /* TEST:
-        //If the timer is in progress, pause timer
-        //If the timer is paused, resume timer
-        if(TimerState == TimerRunning)
-        {
-            TimerState = TimerPaused; //TODO: replace with command to livesplit
-        }
-        else if(TimerState == TimerPaused)
-        {
-            TimerState = TimerRunning;
-        }
-
-        //TODO: for testing, change this to be called when we get new state value from timer
-        UpdateLEDState();
-        */
-    }        
+        SendPause = 1;  //For some reason the result of falling edge debouncing cannot be cast straight to this
+    }
+       
 }
 
 //Split button interrupt
 void IRAM_ATTR SplitInterrupt(void *param)
 {
-    //If enough time has passed for the interrupt call to be concidered legimate, send command
-    int newPress = FallingEdgeDebouncing(&TrgTickStampSplit, &TrgPrevTickStampSplit, TrgDebouncingLimit);
-
-    if(newPress == 1)
+    //If enough time has passed for the interrupt call to be concidered legimate, set send command flag
+    if(FallingEdgeDebouncing(&TrgTickStampSplit, &TrgPrevTickStampSplit, TrgDebouncingLimit) == 1)
     {
-        SendSplit = 1;  //Set flag for sending the command in main loop
-
-        /* TEST:
-        switch(TimerState)
-        {
-            case TimerDefault:     //Timer is in unknown state, set to standby
-                TimerState = TimerStandby;
-                break;
-            case TimerStandby:     //Timer is in standby, start timer
-                TimerState = TimerRunning;
-                break;
-            case TimerRunning:     //Timer is running, stop timer
-                TimerState = TimerFinished;
-                break;
-            case TimerFinished:     //Timer is finished, reset timer
-                TimerState = TimerStandby;
-                break;
-            case TimerPaused:     //Timer is paused, resume timer
-                TimerState = TimerRunning;
-                break;
-            default:
-                TimerState = TimerDefault;
-                break;
-        }
-
-        //TODO: for testing, change this to be called when we get new state value from timer
-        UpdateLEDState();
-        */
+        SendSplit = 1;
     }
 }
 
@@ -554,49 +485,80 @@ void SetupEth()
 void app_main()
 {
     SetupGPIO();
-    SetupEth();    
+    SetupEth();
 
     //---MAIN LOOP---
     while(1)
     {
-        int NewState = 0;
-
-        if(SendSplit == 1)
+        //Check connection status. If connection error is present, update LED
+        if(ConnectionStatusCheck() == 0)
         {
-            LiveSplitQuery(NetworkSocket, CMD_SPLIT);
-            SendSplit = 0;
+            TimerState = TIMER_STATE_DEFAULT;
+            UpdateLEDState(TimerState);
         }
 
+        //If button interrupts have written send command flags to 1, send commands to LiveSplit
+        if(SendSplit == 1)
+        {
+            switch(TimerState)
+            {
+                case TIMER_STATE_STANDBY:
+                    send(NetworkSocket, CMD_SPLIT, strlen(CMD_SPLIT), 0);
+                    break;
+                case TIMER_STATE_RUNNING:
+                    send(NetworkSocket, CMD_SPLIT, strlen(CMD_SPLIT), 0);
+                    break;
+                case TIMER_STATE_FINISHED:
+                    send(NetworkSocket, CMD_RESET, strlen(CMD_RESET), 0);
+                    break;
+                default:
+                    break;
+            }
+
+            SendSplit = 0;
+        }
+        
         if(SendPause == 1)
         {
-            LiveSplitQuery(NetworkSocket, CMD_PAUSE);
+            switch(TimerState)
+            {
+                case TIMER_STATE_RUNNING:
+                    send(NetworkSocket, CMD_PAUSE, strlen(CMD_PAUSE), 0);
+                    break;
+                case TIMER_STATE_PAUSED:
+                    send(NetworkSocket, CMD_RESUME, strlen(CMD_RESUME), 0);
+                    break;
+                default:
+                    break;
+            }
+
             SendPause = 0;
         }
         
+
         //Poll timer state
-        //LiveSplitQuery(NetworkSocket, CMD_GET_STATE);
+        send(NetworkSocket, CMD_GET_STATE, strlen(CMD_GET_STATE), 0);
 
         //Check if got response to timer state poll
-        //NewState = LiveSplitState(NetworkSocket, TimerState);
+        int CurrentTimerState = LiveSplitState(NetworkSocket, TimerState);
 
         //If we got a new state value from LiveSplit, call LEDCInterrput to update the split btn led
-        if(NewState != TimerState)
+        if(CurrentTimerState != TimerState)
         {
-            TimerState = NewState;
-            UpdateLEDState();
+            TimerState = CurrentTimerState;
+            UpdateLEDState(TimerState);
         }
 
-        int ledFadeComplete = CheckLEDFadeProgress(SplitLEDChannelConfig, LED_DUTY_MAX);
-
-        if(ledFadeComplete == 1)
+        //If LED fade has reached the end of the fade cycle. If it has, update the LED state
+        if(CheckLEDFadeProgress(SplitLEDChannelConfig, LED_DUTY_MAX) == 1)
         {
-            UpdateLEDState();
+            UpdateLEDState(TimerState);
         }
 
-        //100ms delay
-        vTaskDelay(pdMS_TO_TICKS(100));
+        //Update cycle
+        vTaskDelay(pdMS_TO_TICKS(250));
 
-        //Test: print connection status
-        //printf("Connection status: %d\n", CStatus);
+        //Print out current timer state
+        //printf("Timer state: %d\n", TimerState);
     }
 }
