@@ -3,6 +3,7 @@
 TODO:
 Expand the usb slot
 Fix button LED brightness upon starting a run. Now it can get stuck on the cycle which it was at standby.
+Investigate whether recovery from the livesplit server going down is possible
 
 Notes:
 Add/change to sdkconfig:
@@ -33,10 +34,10 @@ command to a custom timer which is done via LiveSplit Core or something similar?
 
 
 //I/O
-#define GPIO_BTN_PAUSE 14     //Input_pullup (UEXT)
-#define GPIO_BTN_SPLIT 2      //Input_pullup (UEXT)
-#define GPIO_LED_SPLIT 15     //Output (UEXT)
-#define PIN_PHY_POWER 12      //Ethernet physical layer enable -output
+#define GPIO_BTN_PAUSE 14   //Input_pullup (UEXT)
+#define GPIO_BTN_SPLIT 2    //Input_pullup (UEXT)
+#define GPIO_LED_SPLIT 15   //Output (UEXT)
+#define PIN_PHY_POWER 12    //Ethernet physical layer enable -output
 #define PIN_ETH_MDC 23
 #define PIN_ETH_MDIO 18
 
@@ -53,7 +54,8 @@ command to a custom timer which is done via LiveSplit Core or something similar?
 #define LED_DUTY_MAX 8192
 
 //Local address
-#define LOCAL_IP "192.168.0.21"
+#define LOCAL_IP_BTN1 "192.168.0.21"
+#define LOCAL_IP_BTN2 "192.168.0.22"
 #define SUBNETMASK "255.255.255.0"
 
 //LiveSplit Server IP/Port
@@ -276,8 +278,8 @@ void EthernetEvent(void *arg, esp_event_base_t eventBase, int32_t eventID, void 
 
     tcpip_adapter_ip_info_t ipInfo =
     {
-        .ip.addr = ipaddr_addr(LOCAL_IP),
-        .gw.addr = ipaddr_addr("192.168.0.0"),
+        .ip.addr = ipaddr_addr(LOCAL_IP_BTN1),
+        .gw.addr = ipaddr_addr(LIVESPLIT_IP),
         .netmask.addr = ipaddr_addr(SUBNETMASK)
     };
 
