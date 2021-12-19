@@ -17,11 +17,12 @@ command to a custom timer which is done via LiveSplit Core or something similar?
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/types.h>
-#include <sys/socket.h>
+
 #include <netinet/in.h>
 
 #include "driver/gpio.h"
 #include "driver/ledc.h"
+
 #include "tcpip_adapter.h"
 #include "esp_event.h"
 #include "esp_eth.h"
@@ -31,6 +32,8 @@ command to a custom timer which is done via LiveSplit Core or something similar?
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
+
+#include "commlivesplit.h"
 
 
 //I/O
@@ -53,26 +56,17 @@ command to a custom timer which is done via LiveSplit Core or something similar?
 //0% - 100% duty => 0 - 8192 duty variable
 #define LED_DUTY_MAX 8192
 
-//Local address
+//Button IP info
 #define LOCAL_IP_BTN1 "192.168.0.21"
 #define LOCAL_IP_BTN2 "192.168.0.22"
 #define SUBNETMASK "255.255.255.0"
 
-//LiveSplit Server IP/Port
-#define LIVESPLIT_IP "192.168.0.11"
-#define LIVESPLIT_PORT 16834
-
-//LiveSplit Server command/status messages
-#define CMD_SPLIT "startorsplit\r\n"
-#define CMD_PAUSE "pause\r\n"
-#define CMD_RESUME "resume\r\n"
-#define CMD_RESET "reset\r\n"
-#define CMD_GET_STATE "getcurrenttimerphase\r\n"
-
-#define MSG_STATE_NOT_RUNNING "NotRunning"
-#define MSG_STATE_RUNNING "Running"
-#define MSG_STATE_ENDED "Ended"
-#define MSG_STATE_PAUSED "Paused"
+//Timer control command enumeration
+#define TIMER_CMD_GET_STATE 0
+#define TIMER_CMD_SPLIT 1
+#define TIMER_CMD_PAUSE 2
+#define TIMER_CMD_RESUME 3
+#define TIMER_CMD_RESET 4
 
 //Main state variable
 //0 = default, not connected/error
@@ -85,6 +79,7 @@ command to a custom timer which is done via LiveSplit Core or something similar?
 #define TIMER_STATE_RUNNING 2
 #define TIMER_STATE_FINISHED 3
 #define TIMER_STATE_PAUSED 4
+
 
 static int TimerState = TIMER_STATE_DEFAULT;
 
@@ -107,11 +102,9 @@ static unsigned long TrgPrevTickStampPause = 0;
 static int SendSplit = 0;
 static int SendPause = 0;
 
-//Network socket
-static int NetworkSocket = 0;
 
-//Connection status monitoring
-static unsigned long LastResponseTimestamp = 0;
+
+//Connection status monitoring timeout
 static unsigned long ConnectionTimeout = pdMS_TO_TICKS(10000);
 
 
@@ -173,104 +166,7 @@ static int ConnectionStatusCheck()
 }
 
 
-//Event handler for ethernet events, sets MAC-address upon connecting
-//Connect to livesplit server. Keep retrying until a successfull connection is made
-static void LiveSplitConnect()
-{
-    //Create a socket
-    NetworkSocket = socket(AF_INET, SOCK_STREAM, 0);
-    
-    //Specify IP-address for the socket
-    struct sockaddr_in serverAddr =
-    {
-        .sin_family = AF_INET,
-        .sin_port = htons(LIVESPLIT_PORT),
-        .sin_addr.s_addr = inet_addr(LIVESPLIT_IP)
-    };
-
-    //Connect to the server (LiveSplit)
-    //Only print out error message if first attempt does not go through
-    int connectionStatus = -1;  //connect returns -1 on failed attempt
-    int firstAttempt = 1;
-
-    while(connectionStatus == -1)
-    {
-        if(firstAttempt == 0)
-        {
-            //Flash led every 1s in indication of connection error
-            //TODO: LED flashing doesnt work, try to fix
-            ledc_set_duty(SplitLEDChannelConfig.speed_mode, SplitLEDChannelConfig.channel, LED_DUTY_MAX);
-            ledc_update_duty(SplitLEDChannelConfig.speed_mode, SplitLEDChannelConfig.channel);
-            vTaskDelay(pdMS_TO_TICKS(1000));
-
-            ledc_set_duty(SplitLEDChannelConfig.speed_mode, SplitLEDChannelConfig.channel, 0);
-            ledc_update_duty(SplitLEDChannelConfig.speed_mode, SplitLEDChannelConfig.channel);
-            vTaskDelay(pdMS_TO_TICKS(1000));
-
-            printf("Error connecting to LiveSplit! Retrying...\n");
-        }
-
-        firstAttempt = 0;
-        connectionStatus = connect(NetworkSocket, (struct sockaddr *) &serverAddr, sizeof(serverAddr));
-    }
-
-    printf("Connected to LiveSplit.\n");
-}
-
-
-//Reads a response from LiveSplit server and determines the timer state
-int LiveSplitState(int socket, int currentState)
-{
-    int state = currentState;   //Init to current state, only update if data is available
-    char serverResponse[256];
-
-    //Setup socket monitoring, wait for 20000us before timing out
-    int dataAvailable = 0;
-    fd_set readFds;
-    struct timeval timeout =
-    {
-        .tv_sec = 0,
-        .tv_usec = 20000
-    };
-
-    FD_ZERO(&readFds);
-    FD_SET(socket, &readFds);
-
-    dataAvailable = select(socket+1, &readFds, NULL, NULL, &timeout);
-
-    //If data is available, read it and determine the timer state
-    if(dataAvailable != 0)
-    {
-        ssize_t len = recv(socket, &serverResponse, sizeof(serverResponse), 0);
-
-        if(len > 0)
-        {
-            LastResponseTimestamp = xTaskGetTickCount();    //Save the tick timestamp for connection status monitoring
-        }
-
-        //Check if the predefined responses are included in the server response
-        if(strstr(serverResponse, MSG_STATE_NOT_RUNNING) != NULL)
-        {
-            state = TIMER_STATE_STANDBY;
-        }
-        else if(strstr(serverResponse, MSG_STATE_RUNNING) != NULL)
-        {
-            state = TIMER_STATE_RUNNING;
-        }
-        else if(strstr(serverResponse, MSG_STATE_ENDED) != NULL)
-        {
-            state = TIMER_STATE_FINISHED;
-        }
-        else if(strstr(serverResponse, MSG_STATE_PAUSED) != NULL)
-        {
-            state = TIMER_STATE_PAUSED;
-        }
-    }
-    
-    return state;
-}
-
-
+//Tied to the ethernet event.
 void EthernetEvent(void *arg, esp_event_base_t eventBase, int32_t eventID, void *eventData)
 {
     uint8_t macAddr[6] = {0};
@@ -279,7 +175,7 @@ void EthernetEvent(void *arg, esp_event_base_t eventBase, int32_t eventID, void 
     tcpip_adapter_ip_info_t ipInfo =
     {
         .ip.addr = ipaddr_addr(LOCAL_IP_BTN1),
-        .gw.addr = ipaddr_addr(LIVESPLIT_IP),
+        .gw.addr = ipaddr_addr("192.168.0.254"),
         .netmask.addr = ipaddr_addr(SUBNETMASK)
     };
 
@@ -499,19 +395,19 @@ void app_main()
             UpdateLEDState(TimerState);
         }
 
-        //If button interrupts have written send command flags to 1, send commands to LiveSplit
+        //If button interrupts have written send command flags to 1, send commands to timer
         if(SendSplit == 1)
         {
             switch(TimerState)
             {
                 case TIMER_STATE_STANDBY:
-                    send(NetworkSocket, CMD_SPLIT, strlen(CMD_SPLIT), 0);
+                    LiveSplitCommand(TIMER_CMD_SPLIT);   //TODO: separate socket with websocket
                     break;
                 case TIMER_STATE_RUNNING:
-                    send(NetworkSocket, CMD_SPLIT, strlen(CMD_SPLIT), 0);
+                    LiveSplitCommand(TIMER_CMD_SPLIT);
                     break;
                 case TIMER_STATE_FINISHED:
-                    send(NetworkSocket, CMD_RESET, strlen(CMD_RESET), 0);
+                    LiveSplitCommand(TIMER_CMD_RESET);
                     break;
                 default:
                     break;
@@ -525,10 +421,10 @@ void app_main()
             switch(TimerState)
             {
                 case TIMER_STATE_RUNNING:
-                    send(NetworkSocket, CMD_PAUSE, strlen(CMD_PAUSE), 0);
+                    LiveSplitCommand(TIMER_CMD_PAUSE);
                     break;
                 case TIMER_STATE_PAUSED:
-                    send(NetworkSocket, CMD_RESUME, strlen(CMD_RESUME), 0);
+                    LiveSplitCommand(TIMER_CMD_RESUME);
                     break;
                 default:
                     break;
@@ -539,12 +435,12 @@ void app_main()
         
 
         //Poll timer state
-        send(NetworkSocket, CMD_GET_STATE, strlen(CMD_GET_STATE), 0);
+        LiveSplitCommand(TIMER_CMD_GET_STATE);
 
         //Check if got response to timer state poll
-        int CurrentTimerState = LiveSplitState(NetworkSocket, TimerState);
+        int CurrentTimerState = LiveSplitState(TimerState);
 
-        //If we got a new state value from LiveSplit, call LEDCInterrput to update the split btn led
+        //If we got a new state value from timer, call LEDCInterrput to update the split btn led
         if(CurrentTimerState != TimerState)
         {
             TimerState = CurrentTimerState;
