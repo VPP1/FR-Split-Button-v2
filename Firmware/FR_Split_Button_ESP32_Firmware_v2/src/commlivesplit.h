@@ -3,8 +3,8 @@
 
 extern unsigned long LastResponseTimestamp;
 
-static void LiveSplitConnect();
-int LiveSplitState(int currentState);
-static void LiveSplitCommand(int cmd);
+extern void LiveSplitConnect();
+extern int LiveSplitState(int currentState);
+extern void LiveSplitCommand(int cmd);
 
 #endif //COMMLIVESPLIT_H

@@ -1,3 +1,6 @@
+
+#include "commlivesplit.h"
+
 #include <sys/socket.h>
 
 //LiveSplit Server IP/Port
@@ -40,12 +43,12 @@
 static int Socket = 0;
 
 //Last response timestamp
-static unsigned long LastResponseTimestamp = 0;
+unsigned long LastResponseTimestamp = 0;
 
 
 //Event handler for ethernet events, sets MAC-address upon connecting
 //Connect to livesplit server. Keep retrying until a successfull connection is made
-static void LiveSplitConnect()
+void LiveSplitConnect()
 {
     //Create a socket
     Socket = socket(AF_INET, SOCK_STREAM, 0);
@@ -131,16 +134,26 @@ int LiveSplitState(int currentState)
 }
 
 //Send string command to LiveSplit server
-static void LiveSplitCommand(int cmd)
+void LiveSplitCommand(int cmd)
 {
     switch (cmd)
     {
         case TIMER_CMD_GET_STATE:
             send(Socket, LS_CMD_GET_STATE, strlen(LS_CMD_GET_STATE), 0);
             break;
-    
+        case TIMER_CMD_SPLIT:
+            send(Socket, LS_CMD_SPLIT, strlen(LS_CMD_SPLIT), 0);
+            break;
+        case TIMER_CMD_PAUSE:
+            send(Socket, LS_CMD_PAUSE, strlen(LS_CMD_PAUSE), 0);
+            break;
+        case TIMER_CMD_RESUME:
+            send(Socket, LS_CMD_RESUME, strlen(LS_CMD_RESUME), 0);
+            break;
+        case TIMER_CMD_RESET:
+            send(Socket, LS_CMD_RESET, strlen(LS_CMD_RESET), 0);
+            break;
         default:
             break;
     }
 }
-

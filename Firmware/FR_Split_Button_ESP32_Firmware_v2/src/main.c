@@ -1,17 +1,13 @@
 
 /*
 TODO:
-Expand the usb slot
-Fix button LED brightness upon starting a run. Now it can get stuck on the cycle which it was at standby.
-Investigate whether recovery from the livesplit server going down is possible
+Speedcontrol interface
+IFDEF selection of interface
 
 Notes:
 Add/change to sdkconfig:
 CONFIG_ETH_RMII_CLK_OUTPUT=y
 CONFIG_ETH_RMII_CLK_OUT_GPIO =17
-
-How is multiple buttons during a race handled? Probably some kind of a custom
-command to a custom timer which is done via LiveSplit Core or something similar?
 */
 
 #include <stdio.h>
@@ -34,7 +30,7 @@ command to a custom timer which is done via LiveSplit Core or something similar?
 #include "freertos/queue.h"
 
 #include "commlivesplit.h"
-
+#include "commspeedcontrol.h"
 
 //I/O
 #define GPIO_BTN_PAUSE 14   //Input_pullup (UEXT)
