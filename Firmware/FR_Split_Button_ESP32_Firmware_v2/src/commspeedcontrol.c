@@ -16,7 +16,8 @@ static SemaphoreHandle_t shutdown_sema;
 
 
 //Speedcontrol IP/Port
-#define SPEEDCTRL_ADDR "https://192.168.0.11:9090"
+//#define SPEEDCTRL_ADDR "https://192.168.0.11:9090"
+#define SPEEDCTRL_ADDR "192.168.0.11:9090"
 
 //Speedcontrol commands
 #define SPEEDCTRL_CMD_START "timerStart\r\n"
@@ -93,8 +94,8 @@ static void websocket_app_start(void)
 {
     esp_websocket_client_config_t websocket_cfg = {};
 
-    shutdown_signal_timer = xTimerCreate("Websocket shutdown timer", NO_DATA_TIMEOUT_SEC * 1000 / portTICK_PERIOD_MS,
-                                         pdFALSE, NULL, shutdown_signaler);
+    //shutdown_signal_timer = xTimerCreate("Websocket shutdown timer", NO_DATA_TIMEOUT_SEC * 1000 / portTICK_PERIOD_MS,
+    //                                     pdFALSE, NULL, shutdown_signaler);
     shutdown_sema = xSemaphoreCreateBinary();
 
     websocket_cfg.uri = SPEEDCTRL_ADDR;
@@ -127,8 +128,6 @@ void SpeedCtrlConnect()
     esp_log_level_set("TRANS_TCP", ESP_LOG_DEBUG);
 
     ESP_ERROR_CHECK(nvs_flash_init());
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
 
     websocket_app_start();
 }

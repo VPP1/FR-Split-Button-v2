@@ -32,6 +32,10 @@ CONFIG_ETH_RMII_CLK_OUT_GPIO =17
 #include "commlivesplit.h"
 #include "commspeedcontrol.h"
 
+//Interface selection, LiveSplit/Speedcontrol. Uncomment one
+//#define INTERFACE_LIVESPLIT
+#define INTERFACE_SPEEDCONTROL
+
 //I/O
 #define GPIO_BTN_PAUSE 14   //Input_pullup (UEXT)
 #define GPIO_BTN_SPLIT 2    //Input_pullup (UEXT)
@@ -147,6 +151,42 @@ const static gpio_config_t SplitBtnConfig =
 
 
 //////////////////////////////ETHERNET COMMUNICATION//////////////////////////////
+//Calls the communication setup function of the selected interface
+static void Connect()
+{
+    #if defined(INTERFACE_LIVESPLIT)
+        LiveSplitConnect();
+    #elif defined(INTERFACE_SPEEDCONTROL)
+        SpeedCtrlConnect();
+    #endif
+}
+
+//Calls the communication function of the selected interface
+static void SendCommand(int cmd)
+{
+    #if defined(INTERFACE_LIVESPLIT)
+        LiveSplitCommand(cmd);
+    #elif defined(INTERFACE_SPEEDCONTROL)
+        SpeedCtrlCommand(cmd);
+    #endif
+}
+
+
+//Calls the timer state poll function of the selected interface
+static int PollTimerState(int currentState)
+{
+    int state = currentState;
+
+    #if defined(INTERFACE_LIVESPLIT)
+        state = LiveSplitState(currentState);
+    #elif defined(INTERFACE_SPEEDCONTROL)
+        //TODO
+    #endif
+
+    return state;
+}
+
+
 //Check if too long has passed since the last response from the server
 //0 = connection error, 1 = connection OK
 static int ConnectionStatusCheck()
@@ -198,7 +238,7 @@ static void GotIPEvent(void *arg, esp_event_base_t eventBase,
     printf("Got IP: " IPSTR, IP2STR(&ip_info->ip));
     printf("\n");
 
-    LiveSplitConnect();
+    Connect();
 }
 
 
@@ -397,13 +437,13 @@ void app_main()
             switch(TimerState)
             {
                 case TIMER_STATE_STANDBY:
-                    LiveSplitCommand(TIMER_CMD_SPLIT);   //TODO: separate socket with websocket
+                    SendCommand(TIMER_CMD_SPLIT);
                     break;
                 case TIMER_STATE_RUNNING:
-                    LiveSplitCommand(TIMER_CMD_SPLIT);
+                    SendCommand(TIMER_CMD_SPLIT);
                     break;
                 case TIMER_STATE_FINISHED:
-                    LiveSplitCommand(TIMER_CMD_RESET);
+                    SendCommand(TIMER_CMD_RESET);
                     break;
                 default:
                     break;
@@ -417,10 +457,10 @@ void app_main()
             switch(TimerState)
             {
                 case TIMER_STATE_RUNNING:
-                    LiveSplitCommand(TIMER_CMD_PAUSE);
+                    SendCommand(TIMER_CMD_PAUSE);
                     break;
                 case TIMER_STATE_PAUSED:
-                    LiveSplitCommand(TIMER_CMD_RESUME);
+                    SendCommand(TIMER_CMD_RESUME);
                     break;
                 default:
                     break;
@@ -431,10 +471,10 @@ void app_main()
         
 
         //Poll timer state
-        LiveSplitCommand(TIMER_CMD_GET_STATE);
+        SendCommand(TIMER_CMD_GET_STATE);
 
         //Check if got response to timer state poll
-        int CurrentTimerState = LiveSplitState(TimerState);
+        int CurrentTimerState = PollTimerState(TimerState);
 
         //If we got a new state value from timer, call LEDCInterrput to update the split btn led
         if(CurrentTimerState != TimerState)
