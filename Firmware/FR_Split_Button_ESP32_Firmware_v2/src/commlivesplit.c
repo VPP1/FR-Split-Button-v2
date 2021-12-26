@@ -9,12 +9,12 @@
 
 //LiveSplit Server command messages
 #define LS_CMD_GET_STATE "getcurrenttimerphase\r\n"
-#define LS_CMD_SPLIT "startorsplit\r\n"
+#define LS_CMD_START_OR_SPLIT "startorsplit\r\n"
 #define LS_CMD_PAUSE "pause\r\n"
 #define LS_CMD_RESUME "resume\r\n"
 #define LS_CMD_RESET "reset\r\n"
 
-//LiveSplit Server timer status mesasges
+//LiveSplit Server timer status messages
 #define LS_MSG_STATE_NOT_RUNNING "NotRunning"
 #define LS_MSG_STATE_RUNNING "Running"
 #define LS_MSG_STATE_ENDED "Ended"
@@ -22,10 +22,12 @@
 
 //Timer control command enumeration
 #define TIMER_CMD_GET_STATE 0
-#define TIMER_CMD_SPLIT 1
-#define TIMER_CMD_PAUSE 2
-#define TIMER_CMD_RESUME 3
-#define TIMER_CMD_RESET 4
+#define TIMER_CMD_START_OR_SPLIT 1
+#define TIMER_CMD_STOP 2
+#define TIMER_CMD_PAUSE 3
+#define TIMER_CMD_RESUME 4
+#define TIMER_CMD_RESET 5
+
 
 //Main state variable
 //0 = default, not connected/error
@@ -141,8 +143,8 @@ void LiveSplitCommand(int cmd)
         case TIMER_CMD_GET_STATE:
             send(Socket, LS_CMD_GET_STATE, strlen(LS_CMD_GET_STATE), 0);
             break;
-        case TIMER_CMD_SPLIT:
-            send(Socket, LS_CMD_SPLIT, strlen(LS_CMD_SPLIT), 0);
+        case TIMER_CMD_START_OR_SPLIT:
+            send(Socket, LS_CMD_START_OR_SPLIT, strlen(LS_CMD_START_OR_SPLIT), 0);
             break;
         case TIMER_CMD_PAUSE:
             send(Socket, LS_CMD_PAUSE, strlen(LS_CMD_PAUSE), 0);

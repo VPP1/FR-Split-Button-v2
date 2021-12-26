@@ -17,15 +17,16 @@ static SemaphoreHandle_t shutdown_sema;
 
 //Speedcontrol IP/Port
 //#define SPEEDCTRL_ADDR "https://192.168.0.11:9090"
-#define SPEEDCTRL_ADDR "192.168.0.11:9090"
+#define SPEEDCTRL_ADDR "ws://192.168.0.11:9090"
 
 //Speedcontrol commands
+#define SPEEDCTRL_CMD_GET_STATE "timerGetState\r\n"
 #define SPEEDCTRL_CMD_START "timerStart\r\n"
+#define SPEEDCTRL_CMD_STOP "timerStop\r\n"
 #define SPEEDCTRL_CMD_PAUSE "timerPause\r\n"
 #define SPEEDCTRL_CMD_RESET "timerReset\r\n"
-#define SPEEDCTRL_CMD_STOP "timerStop\r\n"
 
-//LiveSplit Server timer status mesasges
+//Speedcontrol timer status messages
 #define SPEEDCTRL_MSG_STATE_NOT_RUNNING "NotRunning"
 #define SPEEDCTRL_MSG_STATE_RUNNING "Running"
 #define SPEEDCTRL_MSG_STATE_ENDED "Ended"
@@ -33,10 +34,12 @@ static SemaphoreHandle_t shutdown_sema;
 
 //Timer control command enumeration
 #define TIMER_CMD_GET_STATE 0
-#define TIMER_CMD_SPLIT 1
-#define TIMER_CMD_PAUSE 2
-#define TIMER_CMD_RESET 3
-#define TIMER_CMD_STOP 4
+#define TIMER_CMD_START_OR_SPLIT 1
+#define TIMER_CMD_STOP 2
+#define TIMER_CMD_PAUSE 3
+#define TIMER_CMD_RESUME 4
+#define TIMER_CMD_RESET 5
+
 
 //Main state variable
 //0 = default, not connected/error
@@ -78,10 +81,11 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base, i
             ESP_LOGW(TAG, "Received closed message with code=%d", 256*data->data_ptr[0] + data->data_ptr[1]);
         } else {
             ESP_LOGW(TAG, "Received=%.*s", data->data_len, (char *)data->data_ptr);
+            //ESP_LOGW(TAG, "Received=%.*d", data->data_len, (int *)data->data_ptr);
         }
         ESP_LOGW(TAG, "Total payload length=%d, data_len=%d, current payload offset=%d\r\n", data->payload_len, data->data_len, data->payload_offset);
 
-        xTimerReset(shutdown_signal_timer, portMAX_DELAY);
+        //xTimerReset(shutdown_signal_timer, portMAX_DELAY);
         break;
     case WEBSOCKET_EVENT_ERROR:
         ESP_LOGI(TAG, "WEBSOCKET_EVENT_ERROR");
@@ -107,8 +111,8 @@ static void websocket_app_start(void)
 
     esp_websocket_client_start(WSClient);
 
-    xTimerStart(shutdown_signal_timer, portMAX_DELAY);
-    xSemaphoreTake(shutdown_sema, portMAX_DELAY);
+    //xTimerStart(shutdown_signal_timer, portMAX_DELAY);
+    //xSemaphoreTake(shutdown_sema, portMAX_DELAY);
 }
 
 
@@ -141,6 +145,25 @@ void SpeedCtrlCommand(int cmd)
 {
     if (esp_websocket_client_is_connected(WSClient))
     {
-        esp_websocket_client_send_text(WSClient, SPEEDCTRL_CMD_START, strlen(SPEEDCTRL_CMD_START), portMAX_DELAY);
+        switch (cmd)
+        {
+            case TIMER_CMD_GET_STATE:
+                esp_websocket_client_send_text(WSClient, SPEEDCTRL_CMD_GET_STATE, strlen(SPEEDCTRL_CMD_GET_STATE), portMAX_DELAY);
+                break;
+            case TIMER_CMD_START_OR_SPLIT:
+                esp_websocket_client_send_text(WSClient, SPEEDCTRL_CMD_START, strlen(SPEEDCTRL_CMD_START), portMAX_DELAY);
+                break;
+            case TIMER_CMD_STOP:
+                esp_websocket_client_send_text(WSClient, SPEEDCTRL_CMD_STOP, strlen(SPEEDCTRL_CMD_STOP), portMAX_DELAY);
+                break;
+            case TIMER_CMD_PAUSE:
+                esp_websocket_client_send_text(WSClient, SPEEDCTRL_CMD_PAUSE, strlen(SPEEDCTRL_CMD_PAUSE), portMAX_DELAY);
+                break;
+            case TIMER_CMD_RESET:
+                esp_websocket_client_send_text(WSClient, SPEEDCTRL_CMD_RESET, strlen(SPEEDCTRL_CMD_RESET), portMAX_DELAY);
+                break;
+            default:
+                break;
+        }
     }    
 }

@@ -63,10 +63,11 @@ CONFIG_ETH_RMII_CLK_OUT_GPIO =17
 
 //Timer control command enumeration
 #define TIMER_CMD_GET_STATE 0
-#define TIMER_CMD_SPLIT 1
-#define TIMER_CMD_PAUSE 2
-#define TIMER_CMD_RESUME 3
-#define TIMER_CMD_RESET 4
+#define TIMER_CMD_START_OR_SPLIT 1
+#define TIMER_CMD_STOP 2
+#define TIMER_CMD_PAUSE 3
+#define TIMER_CMD_RESUME 4
+#define TIMER_CMD_RESET 5
 
 //Main state variable
 //0 = default, not connected/error
@@ -437,10 +438,14 @@ void app_main()
             switch(TimerState)
             {
                 case TIMER_STATE_STANDBY:
-                    SendCommand(TIMER_CMD_SPLIT);
+                    SendCommand(TIMER_CMD_START_OR_SPLIT);
                     break;
                 case TIMER_STATE_RUNNING:
-                    SendCommand(TIMER_CMD_SPLIT);
+                    #if defined(INTERFACE_LIVESPLIT)
+                        SendCommand(TIMER_CMD_START_OR_SPLIT);
+                    #elif defined(INTERFACE_SPEEDCONTROL)
+                        SendCommand(TIMER_CMD_STOP);
+                    #endif
                     break;
                 case TIMER_STATE_FINISHED:
                     SendCommand(TIMER_CMD_RESET);
@@ -460,7 +465,11 @@ void app_main()
                     SendCommand(TIMER_CMD_PAUSE);
                     break;
                 case TIMER_STATE_PAUSED:
-                    SendCommand(TIMER_CMD_RESUME);
+                    #if defined(INTERFACE_LIVESPLIT)
+                        SendCommand(TIMER_CMD_RESUME);
+                    #elif defined(INTERFACE_SPEEDCONTROL)
+                        SendCommand(TIMER_CMD_START_OR_SPLIT);
+                    #endif
                     break;
                 default:
                     break;
