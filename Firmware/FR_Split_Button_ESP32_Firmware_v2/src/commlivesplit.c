@@ -30,22 +30,22 @@
 
 
 //Main state variable
-//0 = default, not connected/error
-//1 = not running
-//2 = timer running
-//3 = timer finished (ended)
-//4 = timer paused
-#define TIMER_STATE_DEFAULT 0
-#define TIMER_STATE_STANDBY 1
-#define TIMER_STATE_RUNNING 2
-#define TIMER_STATE_FINISHED 3
-#define TIMER_STATE_PAUSED 4
+//-1 = default, not connected/error
+//0 = not running
+//1 = timer running
+//2 = timer finished (ended)
+//3 = timer paused
+#define TIMER_STATE_DEFAULT -1
+#define TIMER_STATE_STANDBY 0
+#define TIMER_STATE_RUNNING 1
+#define TIMER_STATE_FINISHED 2
+#define TIMER_STATE_PAUSED 3
 
 //Network socket
 static int Socket = 0;
 
 //Last response timestamp
-unsigned long LastResponseTimestamp = 0;
+static unsigned long LastResponseTimestamp = 0;
 
 
 //Event handler for ethernet events, sets MAC-address upon connecting
@@ -80,6 +80,20 @@ void LiveSplitConnect()
     }
 
     printf("Connected to LiveSplit.\n");
+}
+
+
+//Returns the connection status
+int LiveSplitConnectionStatus(unsigned long timeout)
+{
+    if((xTaskGetTickCount() - LastResponseTimestamp) > timeout)
+    {
+        return 0;
+    }
+    else
+    {
+        return 1;
+    }
 }
 
 

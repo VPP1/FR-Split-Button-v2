@@ -2,7 +2,13 @@
 /*
 TODO:
 Speedcontrol interface
-IFDEF selection of interface
+
+Figure out if build issues are caused by not having nodecg installed in the speedcontrol folder. See instructions.
+
+Modify timer.ts to return timer state
+Figure out how to get response from timer.ts to fr-splitbtn-ws.ts
+
+Fix LED getting stuck on dim sometimes on new runs (state 0 -> 1 transition)
 
 Notes:
 Add/change to sdkconfig:
@@ -70,16 +76,16 @@ CONFIG_ETH_RMII_CLK_OUT_GPIO =17
 #define TIMER_CMD_RESET 5
 
 //Main state variable
-//0 = default, not connected/error
-//1 = not running
-//2 = timer running
-//3 = timer finished (ended)
-//4 = timer paused
-#define TIMER_STATE_DEFAULT 0
-#define TIMER_STATE_STANDBY 1
-#define TIMER_STATE_RUNNING 2
-#define TIMER_STATE_FINISHED 3
-#define TIMER_STATE_PAUSED 4
+//-1 = default, not connected/error
+//0 = not running
+//1 = timer running
+//2 = timer finished (ended)
+//3 = timer paused
+#define TIMER_STATE_DEFAULT -1
+#define TIMER_STATE_STANDBY 0
+#define TIMER_STATE_RUNNING 1
+#define TIMER_STATE_FINISHED 2
+#define TIMER_STATE_PAUSED 3
 
 
 static int TimerState = TIMER_STATE_DEFAULT;
@@ -93,7 +99,7 @@ static int PWMPhase = 0;
 //Filters out extra interrupt triggers upon pressing a button
 //Without filtering, the interrupts can trigger up to 20 times when pressing a button
 //Define time in milliseconds at pdMS_TO_TICKS()
-static unsigned long TrgDebouncingLimit = pdMS_TO_TICKS(250);
+static const unsigned long TrgDebouncingLimit = pdMS_TO_TICKS(250);
 static unsigned long TrgTickStampSplit = 0;
 static unsigned long TrgPrevTickStampSplit = 0;
 static unsigned long TrgTickStampPause = 0;
@@ -106,7 +112,7 @@ static int SendPause = 0;
 
 
 //Connection status monitoring timeout
-static unsigned long ConnectionTimeout = pdMS_TO_TICKS(10000);
+static const unsigned long ConnectionTimeout = pdMS_TO_TICKS(10000);
 
 
 //////////////////////////////CONFIGURATIONS//////////////////////////////
@@ -181,10 +187,20 @@ static int PollTimerState(int currentState)
     #if defined(INTERFACE_LIVESPLIT)
         state = LiveSplitState(currentState);
     #elif defined(INTERFACE_SPEEDCONTROL)
-        //TODO
+        state = SpeedCtrlState();
     #endif
 
-    return state;
+    //printf("Current state: %d\r\nReturned state: %d\r\n", currentState, state);
+
+    if (currentState != state)
+    {
+        TimerState = state;
+        return 1;
+    }
+    else
+    {
+        return 0;
+    }
 }
 
 
@@ -192,14 +208,15 @@ static int PollTimerState(int currentState)
 //0 = connection error, 1 = connection OK
 static int ConnectionStatusCheck()
 {
-    if((xTaskGetTickCount() - LastResponseTimestamp) > ConnectionTimeout)
-    {
-        return 0;
-    }
-    else
-    {
-        return 1;
-    }
+    int connectionOK = 0;
+
+    #if defined(INTERFACE_LIVESPLIT)
+        connectionOK = LiveSplitConnectionStatus(ConnectionTimeout);
+    #elif defined(INTERFACE_SPEEDCONTROL)
+        connectionOK = SpeedCtrlConnectionStatus(ConnectionTimeout);
+    #endif
+
+    return connectionOK;
 }
 
 
@@ -482,13 +499,9 @@ void app_main()
         //Poll timer state
         SendCommand(TIMER_CMD_GET_STATE);
 
-        //Check if got response to timer state poll
-        int CurrentTimerState = PollTimerState(TimerState);
-
         //If we got a new state value from timer, call LEDCInterrput to update the split btn led
-        if(CurrentTimerState != TimerState)
+        if(PollTimerState(TimerState) == 1)
         {
-            TimerState = CurrentTimerState;
             UpdateLEDState(TimerState);
         }
 
@@ -501,7 +514,7 @@ void app_main()
         //Update cycle
         vTaskDelay(pdMS_TO_TICKS(250));
 
-        //Print out current timer state
-        //printf("Timer state: %d\n", TimerState);
+        //Print current state
+        printf("State: %d\r\n", TimerState);
     }
 }
