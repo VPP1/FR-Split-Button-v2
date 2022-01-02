@@ -1,14 +1,11 @@
 
 /*
 TODO:
-Speedcontrol interface
+Speedcontrol interface:
+- Team timer control (multiple buttons)
 
-Figure out if build issues are caused by not having nodecg installed in the speedcontrol folder. See instructions.
-
-Modify timer.ts to return timer state
-Figure out how to get response from timer.ts to fr-splitbtn-ws.ts
-
-Fix LED getting stuck on dim sometimes on new runs (state 0 -> 1 transition)
+Button firmware:
+- Fix LED getting stuck on dim sometimes on new runs (state 0 -> 1 transition)
 
 Notes:
 Add/change to sdkconfig:
@@ -513,8 +510,5 @@ void app_main()
 
         //Update cycle
         vTaskDelay(pdMS_TO_TICKS(250));
-
-        //Print current state
-        printf("State: %d\r\n", TimerState);
     }
 }

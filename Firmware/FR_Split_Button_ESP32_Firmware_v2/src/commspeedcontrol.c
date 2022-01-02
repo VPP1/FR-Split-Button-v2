@@ -10,14 +10,14 @@
 static const char *TAG = "WEBSOCKET";
 
 //Speedcontrol IP/Port
-#define SPEEDCTRL_ADDR "ws://192.168.0.11:9090"
+#define SPEEDCTRL_ADDR "ws://192.168.0.11:9091"
 
-//Speedcontrol commands
-#define SPEEDCTRL_CMD_GET_STATE "timerGetState"
-#define SPEEDCTRL_CMD_START "timerStart"
-#define SPEEDCTRL_CMD_STOP "timerStop"
-#define SPEEDCTRL_CMD_PAUSE "timerPause"
-#define SPEEDCTRL_CMD_RESET "timerReset"
+// //Speedcontrol commands
+// #define SPEEDCTRL_CMD_GET_STATE "timerGetState"
+// #define SPEEDCTRL_CMD_START "timerStart"
+// #define SPEEDCTRL_CMD_STOP "timerStop"
+// #define SPEEDCTRL_CMD_PAUSE "timerPause"
+// #define SPEEDCTRL_CMD_RESET "timerReset"
 
 //Timer control command enumeration
 #define TIMER_CMD_GET_STATE 0
@@ -76,6 +76,11 @@ static void WebsocketEventHandler(void *handlerArgs, esp_event_base_t base, int3
                     TimerState = state;
                 }    
             }
+
+            //Debug
+            ESP_LOGW(TAG, "Total payload length=%d, data_len=%d, current payload offset=%d\r\n", data->payload_len, data->data_len, data->payload_offset);
+            ESP_LOGW(TAG, "Received=%.*s", data->data_len, (char *)data->data_ptr);
+
             break;
         case WEBSOCKET_EVENT_ERROR:
             ESP_LOGI(TAG, "WEBSOCKET_EVENT_ERROR");
@@ -97,14 +102,6 @@ static void WebsocketStart(void)
 
     esp_websocket_client_start(WSClient);
 }
-
-
-static void WebsocketClose()
-{
-    esp_websocket_client_close(WSClient, portMAX_DELAY);
-    esp_websocket_client_destroy(WSClient);
-}
-
 
 
 void SpeedCtrlConnect()
@@ -144,25 +141,9 @@ void SpeedCtrlCommand(int cmd)
 {
     if (esp_websocket_client_is_connected(WSClient))
     {
-        switch (cmd)
-        {
-            case TIMER_CMD_GET_STATE:
-                esp_websocket_client_send_text(WSClient, SPEEDCTRL_CMD_GET_STATE, strlen(SPEEDCTRL_CMD_GET_STATE), portMAX_DELAY);
-                break;
-            case TIMER_CMD_START_OR_SPLIT:
-                esp_websocket_client_send_text(WSClient, SPEEDCTRL_CMD_START, strlen(SPEEDCTRL_CMD_START), portMAX_DELAY);
-                break;
-            case TIMER_CMD_STOP:
-                esp_websocket_client_send_text(WSClient, SPEEDCTRL_CMD_STOP, strlen(SPEEDCTRL_CMD_STOP), portMAX_DELAY);
-                break;
-            case TIMER_CMD_PAUSE:
-                esp_websocket_client_send_text(WSClient, SPEEDCTRL_CMD_PAUSE, strlen(SPEEDCTRL_CMD_PAUSE), portMAX_DELAY);
-                break;
-            case TIMER_CMD_RESET:
-                esp_websocket_client_send_text(WSClient, SPEEDCTRL_CMD_RESET, strlen(SPEEDCTRL_CMD_RESET), portMAX_DELAY);
-                break;
-            default:
-                break;
-        }
+        char cmdChar[1];
+        cmdChar[0] = cmd + '0';
+        
+        esp_websocket_client_send_text(WSClient, cmdChar, sizeof(cmdChar), portMAX_DELAY);
     }    
 }
