@@ -4,7 +4,7 @@
 #include <sys/socket.h>
 
 //LiveSplit Server IP/Port
-#define LIVESPLIT_IP "192.168.0.11"
+#define LIVESPLIT_IP "192.168.101.11"
 #define LIVESPLIT_PORT 16834
 
 //LiveSplit Server command messages

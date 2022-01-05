@@ -10,7 +10,7 @@
 static const char *TAG = "WEBSOCKET";
 
 //Speedcontrol IP/Port
-#define SPEEDCTRL_ADDR "ws://192.168.0.11:9091"
+#define SPEEDCTRL_ADDR "ws://192.168.101.11:9091"
 
 // //Speedcontrol commands
 // #define SPEEDCTRL_CMD_GET_STATE "timerGetState"

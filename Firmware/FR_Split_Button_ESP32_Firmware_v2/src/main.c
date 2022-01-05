@@ -60,8 +60,8 @@ CONFIG_ETH_RMII_CLK_OUT_GPIO =17
 #define LED_DUTY_MAX 8192
 
 //Button IP info
-#define LOCAL_IP_BTN1 "192.168.0.21"
-#define LOCAL_IP_BTN2 "192.168.0.22"
+#define LOCAL_IP_BTN1 "192.168.101.21"
+#define LOCAL_IP_BTN2 "192.168.101.22"
 #define SUBNETMASK "255.255.255.0"
 
 //Timer control command enumeration
